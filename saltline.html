@@ -1,0 +1,1134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SALT LINE — a two-player duel</title>
+<style>
+  :root{
+    --bg:#06090f;
+    --ink:#dfe7f2;
+    --dim:#7b8899;
+    --ines:#ffb347;
+    --cato:#7fe8ff;
+    --edge:#1b2735;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    overflow:hidden;}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;}
+  canvas{display:block;image-rendering:auto;background:#06090f;
+    box-shadow:0 0 0 1px #16202c, 0 24px 80px rgba(0,0,0,.8);}
+  #overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+    padding:6vh 6vw;background:radial-gradient(ellipse at 50% 40%, rgba(8,12,20,.86), rgba(4,6,10,.97));
+    backdrop-filter:blur(2px);}
+  #overlay.on{display:flex;}
+  .card{max-width:760px;width:100%;animation:rise .5s ease both;}
+  @keyframes rise{from{opacity:0;transform:translateY(14px);}to{opacity:1;transform:none;}}
+  .kicker{font:600 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+    letter-spacing:.34em;text-transform:uppercase;color:var(--dim);margin-bottom:18px;}
+  h1{font-size:clamp(44px,9vw,96px);line-height:.92;margin:0 0 10px;letter-spacing:.06em;font-weight:500;}
+  h2{font-size:clamp(24px,4vw,38px);line-height:1.1;margin:0 0 18px;font-weight:500;letter-spacing:.02em;}
+  p{font-size:clamp(15px,1.9vw,19px);line-height:1.62;margin:0 0 14px;color:#c3cedd;max-width:62ch;}
+  p.speaker{font:600 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.28em;
+    text-transform:uppercase;color:var(--dim);margin-bottom:12px;}
+  .ines{color:var(--ines);} .cato{color:var(--cato);}
+  .hint{margin-top:28px;font:500 13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
+    letter-spacing:.16em;color:var(--dim);text-transform:uppercase;}
+  .hint b{color:var(--ink);font-weight:600;}
+  .keys{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin:26px 0 0;
+    font:500 13px/1.9 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.04em;}
+  .keys section{border-top:1px solid var(--edge);padding-top:12px;}
+  .keys h3{margin:0 0 8px;font:600 12px/1 ui-monospace,monospace;letter-spacing:.28em;text-transform:uppercase;}
+  .keys dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:2px 14px;color:#a9b6c7;}
+  .keys dt{color:#e8eef7;}
+  kbd{display:inline-block;border:1px solid #2b3a4d;border-bottom-width:2px;border-radius:4px;
+    padding:1px 6px;background:#0e1720;color:#e8eef7;font:600 12px/1.5 ui-monospace,monospace;}
+  .rule{height:1px;background:linear-gradient(90deg,transparent,var(--edge),transparent);margin:26px 0;}
+  .blink{animation:blink 1.6s ease-in-out infinite;}
+  @keyframes blink{0%,100%{opacity:.45}50%{opacity:1}}
+  @media (prefers-reduced-motion:reduce){.card,.blink{animation:none;}}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="960" height="600"></canvas>
+  <div id="overlay"></div>
+</div>
+<script>
+"use strict";
+/* ============================================================
+   SALT LINE — a two-player, local-hotseat mirror duel.
+   Design rule: nothing in the simulation is random. Every
+   outcome comes from positioning, aim, timing, and reading
+   your opponent. (Randomness is used for cosmetic sparks only.)
+   ============================================================ */
+
+const W = 960, H = 600;
+const cvs = document.getElementById("c");
+const ctx = cvs.getContext("2d");
+const overlay = document.getElementById("overlay");
+
+/* The simulation always thinks in a 960x600 field; the canvas is scaled
+   to whatever room the window has, at device pixel density. */
+let viewScale = 1;
+function fitCanvas(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const s = Math.min((innerWidth - 32) / W, (innerHeight - 32) / H);
+  viewScale = Math.max(0.4, s);
+  cvs.style.width  = (W * viewScale) + "px";
+  cvs.style.height = (H * viewScale) + "px";
+  cvs.width  = Math.round(W * viewScale * dpr);
+  cvs.height = Math.round(H * viewScale * dpr);
+  viewScale *= dpr;
+}
+addEventListener("resize", fitCanvas);
+fitCanvas();
+
+/* ---------- tuning ---------- */
+const P_RADIUS      = 13;
+const P_ACCEL       = 2600;   // px/s^2
+const P_MAXSPEED    = 265;
+const P_FRICTION    = 9.0;    // exponential damping
+const DASH_SPEED    = 760;
+const DASH_TIME     = 0.16;
+const DASH_COOLDOWN = 1.35;
+
+const M_RADIUS      = 5;
+const M_SPEED       = 520;
+const M_SPEED_PARRY = 660;
+const M_MAX_BOUNCE  = 5;
+const M_LIFE        = 6.0;
+const M_ARM_TIME    = 0.45;   // a mote goes live even without bouncing
+const AMMO          = 3;
+const FIRE_COOLDOWN = 0.22;
+const RELOAD_TIME   = 0.9;    // after a mote fizzles, before the shot returns
+
+const PARRY_TIME    = 0.14;
+const PARRY_COOLDOWN= 0.9;
+const PARRY_REACH   = 38;
+const PARRY_ARC     = Math.PI * 0.62;  // total width of the guard arc
+
+const ROUND_TIME    = 45;     // seconds before the dark starts closing
+const CLOSE_STEP    = 1.4;    // seconds between encroachments
+const CLOSE_AMOUNT  = 24;     // px per encroachment
+const WINS_NEEDED   = 3;
+
+/* ---------- arenas (all 180deg-rotationally symmetric: no side has an edge) ---------- */
+const ARENAS = [
+  { name:"The Lamp Room",
+    walls:[ {x:430,y:250,w:100,h:100},
+            {x:150,y:120,w:40,h:140}, {x:770,y:340,w:40,h:140} ],
+    spawns:[[120,300],[840,300]] },
+
+  { name:"The Cistern",
+    walls:[ {x:240,y:140,w:120,h:40}, {x:600,y:420,w:120,h:40},
+            {x:240,y:420,w:120,h:40}, {x:600,y:140,w:120,h:40},
+            {x:420,y:260,w:120,h:80, void:true} ],
+    spawns:[[120,120],[840,480]] },
+
+  { name:"The Salt Line",
+    walls:[ {x:200,y:200,w:560,h:24}, {x:200,y:376,w:560,h:24},
+            {x:80,y:280,w:24,h:40},   {x:856,y:280,w:24,h:40} ],
+    spawns:[[120,100],[840,500]] },
+
+  { name:"The Door Below",
+    walls:[ {x:300,y:100,w:40,h:180}, {x:620,y:320,w:40,h:180},
+            {x:140,y:380,w:120,h:24}, {x:700,y:196,w:120,h:24},
+            {x:440,y:270,w:80,h:60, void:true} ],
+    spawns:[[120,300],[840,300]] },
+
+  { name:"One Light",
+    walls:[ {x:380,y:180,w:40,h:40}, {x:540,y:180,w:40,h:40},
+            {x:380,y:380,w:40,h:40}, {x:540,y:380,w:40,h:40},
+            {x:60,y:240,w:24,h:120},  {x:876,y:240,w:24,h:120} ],
+    spawns:[[120,120],[840,480]] },
+];
+
+/* ---------- story ---------- */
+const KEEPERS = [
+  { name:"INES", color:"#ffb347", cls:"ines" },
+  { name:"CATO", color:"#7fe8ff", cls:"cato" },
+];
+
+// One beat per round. beats[i] plays before round i+1.
+const BEATS = [
+  { head:"Dusk, the first night", who:0, lines:[
+    "The lamp takes one keeper. The Order was clear about that, and the Order is thirty years drowned, so the rule is only habit now. Habit is most of what holds this coast together.",
+    "So we do it the old way. Mirrors, at dusk, until one of us can't stand. The loser walks the salt line inland at low tide and does not come back.",
+    "I packed her bag this morning. She'll call that arrogance. It's just hope that I won't have to hand it to her." ]},
+
+  { head:"The ledger", who:1, lines:[
+    "Ines fights like the tower is already hers. It isn't.",
+    "I counted the oil tonight because I couldn't sleep. Nineteen drums in the ledger. Eleven in the cellar. Someone has been burning it somewhere that isn't up here.",
+    "The lamp doesn't drink that much. Nothing above the waterline does." ]},
+
+  { head:"Under the cistern", who:0, lines:[
+    "There is a door below the cistern with our grandmother's mark cut into it, and warmth coming through the gap at the bottom.",
+    "Warm. In a flooded cellar. In February.",
+    "I put my hand flat against it and something on the other side went quiet. Not away — quiet. The way you go quiet when you're listening for someone to do it again." ]},
+
+  { head:"What the Order actually wrote", who:1, lines:[
+    "Found it water-stained at the back of the log, in a hand older than the flood:",
+    "“The light is not for the ships. Keep it lit and keep it single. Two lights wake it.”",
+    "That's the duel. Not the honour of the tower, not the lineage, none of the things we were told to be proud of. If we both stayed we would both keep lamps, and then —" ]},
+
+  { head:"The last dusk", who:0, lines:[
+    "So it was never a prize. It was a way of rationing us.",
+    "Whoever wins tonight sits alone above that door for the rest of their life. Whoever loses gets the road, and the road is the mercy.",
+    "Funny, how many years I spent trying to win." ]},
+];
+
+const EPILOGUE = [
+  { head:"One light on the coast", who:0, lines:[
+    "Ines climbs. The wick catches on the second match and holds.",
+    "Below the cistern something turns over in its sleep and settles, the way a thing settles when it has decided it can wait.",
+    "Cato takes the salt line inland at low tide without once looking back — because Ines is watching, and a keeper who looks back is a keeper who comes back, and the tower holds one.",
+    "By morning there is a single light burning on eighty miles of drowned coast. There was only ever supposed to be one." ]},
+  { head:"One light on the coast", who:1, lines:[
+    "Cato climbs. Her hands shake on the wick for the first hour, and then they don't.",
+    "Ines walks out at low tide with the bag she packed days ago — she packed it for this outcome too, and told nobody, which is the closest thing to tenderness either of them managed.",
+    "Below the cistern the warmth fades to almost nothing. Almost.",
+    "By morning there is a single light burning on eighty miles of drowned coast. There was only ever supposed to be one." ]},
+];
+
+const ROUND_FLAVOR = [
+  "the mirror holds",
+  "a clean line",
+  "read, and answered",
+  "one lamp, one keeper",
+  "the coast goes dark for a breath",
+];
+
+/* ============================================================
+   INPUT
+   ============================================================ */
+const held = new Set(), edge = new Set();
+const BLOCK = new Set(["Space","ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Slash","Period","Comma","KeyQ","KeyE"]);
+
+const typing = e => {
+  const t = e.target;
+  return t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT");
+};
+addEventListener("keydown", e => {
+  if (typing(e)){ if (e.code === "Escape") { held.add(e.code); edge.add(e.code); } return; }
+  if (BLOCK.has(e.code)) e.preventDefault();
+  if (e.repeat) return;
+  held.add(e.code); edge.add(e.code);
+}, {passive:false});
+addEventListener("keyup", e => held.delete(e.code));
+addEventListener("blur", () => { held.clear(); edge.clear(); });
+
+const SCHEMES = [
+  { up:"KeyW", down:"KeyS", left:"KeyA", right:"KeyD", fire:"Space", parry:"KeyQ", dash:"KeyE",
+    label:["W A S D","SPACE","Q","E"] },
+  { up:"ArrowUp", down:"ArrowDown", left:"ArrowLeft", right:"ArrowRight", fire:"Period", parry:"Comma", dash:"Slash",
+    label:["ARROWS",". (period)",", (comma)","/ (slash)"] },
+];
+
+function blankInput(){ return {ax:0, ay:0, fire:false, parry:false, dash:false, confirm:false}; }
+
+function readInput(schemeIndex){
+  const s = SCHEMES[schemeIndex], i = blankInput();
+  if (held.has(s.left))  i.ax -= 1;
+  if (held.has(s.right)) i.ax += 1;
+  if (held.has(s.up))    i.ay -= 1;
+  if (held.has(s.down))  i.ay += 1;
+  i.fire  = edge.has(s.fire);
+  i.parry = edge.has(s.parry);
+  i.dash  = edge.has(s.dash);
+  i.confirm = i.fire || edge.has("Enter");
+  return i;
+}
+// Either player may advance a story card in local play.
+function anyConfirm(){
+  return edge.has("Space") || edge.has("Enter") || edge.has("Period");
+}
+
+/* ============================================================
+   GEOMETRY HELPERS
+   ============================================================ */
+function clamp(v,a,b){ return v<a?a:v>b?b:v; }
+function len(x,y){ return Math.hypot(x,y); }
+
+// Push a circle out of an axis-aligned rect. Returns the axis of the
+// shallowest overlap ("x"/"y") or null when there is no contact.
+function resolveCircleRect(c, r, rad){
+  const nx = clamp(c.x, r.x, r.x + r.w), ny = clamp(c.y, r.y, r.y + r.h);
+  const dx = c.x - nx, dy = c.y - ny, d2 = dx*dx + dy*dy;
+  if (d2 > rad*rad) return null;
+
+  if (d2 > 1e-6){                      // touching an edge or corner
+    const d = Math.sqrt(d2), push = rad - d;
+    c.x += (dx/d) * push; c.y += (dy/d) * push;
+    return Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+  }
+  // centre is inside the rect: eject along the shallowest face
+  const l = c.x - r.x, rr = r.x + r.w - c.x, t = c.y - r.y, b = r.y + r.h - c.y;
+  const m = Math.min(l, rr, t, b);
+  if (m === l)  { c.x = r.x - rad;        return "x"; }
+  if (m === rr) { c.x = r.x + r.w + rad;  return "x"; }
+  if (m === t)  { c.y = r.y - rad;        return "y"; }
+  c.y = r.y + r.h + rad;                  return "y";
+}
+
+/* ============================================================
+   SIMULATION
+   ============================================================ */
+class Player {
+  constructor(idx){ this.idx = idx; this.reset(0,0); }
+  reset(x,y){
+    this.x=x; this.y=y; this.vx=0; this.vy=0;
+    this.fx = x < W/2 ? 1 : -1; this.fy = 0;   // facing, unit vector
+    this.alive = true;
+    this.ammo = AMMO; this.reloads = [];
+    this.fireCd = 0; this.parryCd = 0; this.parryT = 0;
+    this.dashCd = 0; this.dashT = 0;
+    this.flash = 0;
+  }
+  get facing(){ return Math.atan2(this.fy, this.fx); }
+}
+
+class Mote {
+  constructor(owner,x,y,vx,vy){
+    this.owner=owner; this.x=x; this.y=y; this.vx=vx; this.vy=vy;
+    this.age=0; this.bounces=0; this.armed=false; this.dead=false;
+    this.trail=[];
+  }
+}
+
+class Game {
+  constructor(){
+    this.scores=[0,0];
+    this.round=0;
+    this.motes=[];
+    this.players=[new Player(0), new Player(1)];
+    this.sparks=[];
+    this.shake=0;
+    this.loadRound(0);
+  }
+
+  loadRound(i){
+    this.round = i;
+    this.arena = ARENAS[i % ARENAS.length];
+    this.walls = this.arena.walls.map(w => ({...w}));
+    this.motes.length = 0;
+    this.sparks.length = 0;
+    this.time = 0;
+    this.encroach = 0;
+    this.closeTimer = 0;
+    this.overTimer = 0;
+    this.result = null;          // {winner:0|1|-1}
+    const sp = this.arena.spawns;
+    this.players[0].reset(sp[0][0], sp[0][1]);
+    this.players[1].reset(sp[1][0], sp[1][1]);
+    this.players[0].fx = 1; this.players[1].fx = -1;
+  }
+
+  // Rect list including the closing dark, which motes bounce off.
+  bounds(){
+    const e = this.encroach;
+    return {x:e, y:e, w:W-2*e, h:H-2*e};
+  }
+
+  step(dt, inputs){
+    this.time += dt;
+    if (this.shake > 0) this.shake = Math.max(0, this.shake - dt*3.5);
+
+    if (!this.result){
+      // The dark closes in so a stalemate is impossible without being decided.
+      if (this.time > ROUND_TIME){
+        this.closeTimer += dt;
+        if (this.closeTimer >= CLOSE_STEP){
+          this.closeTimer -= CLOSE_STEP;
+          this.encroach = Math.min(this.encroach + CLOSE_AMOUNT, 200);
+        }
+      }
+      for (let i=0;i<2;i++) this.stepPlayer(this.players[i], inputs[i], dt);
+      this.stepMotes(dt);
+      this.checkDeaths();
+    } else {
+      this.overTimer += dt;
+      this.stepMotes(dt * 0.25);   // slow motion on the kill
+    }
+    this.stepSparks(dt);
+  }
+
+  stepPlayer(p, inp, dt){
+    if (!p.alive) return;
+    p.fireCd  = Math.max(0, p.fireCd  - dt);
+    p.parryCd = Math.max(0, p.parryCd - dt);
+    p.dashCd  = Math.max(0, p.dashCd  - dt);
+    p.parryT  = Math.max(0, p.parryT  - dt);
+    p.dashT   = Math.max(0, p.dashT   - dt);
+    p.flash   = Math.max(0, p.flash   - dt);
+
+    for (let i = p.reloads.length - 1; i >= 0; i--){
+      p.reloads[i] -= dt;
+      if (p.reloads[i] <= 0){ p.reloads.splice(i,1); p.ammo = Math.min(AMMO, p.ammo + 1); }
+    }
+
+    let ax = inp.ax, ay = inp.ay;
+    const m = len(ax, ay);
+    if (m > 0){
+      ax /= m; ay /= m;
+      p.fx = ax; p.fy = ay;                 // aim is welded to movement: no free-look
+    }
+
+    if (inp.dash && p.dashCd <= 0){
+      p.vx = p.fx * DASH_SPEED; p.vy = p.fy * DASH_SPEED;
+      p.dashT = DASH_TIME; p.dashCd = DASH_COOLDOWN;
+    }
+    if (inp.parry && p.parryCd <= 0){
+      p.parryT = PARRY_TIME; p.parryCd = PARRY_COOLDOWN;
+    }
+    if (inp.fire && p.fireCd <= 0 && p.ammo > 0){
+      p.ammo--; p.fireCd = FIRE_COOLDOWN;
+      const sx = p.x + p.fx * (P_RADIUS + M_RADIUS + 2);
+      const sy = p.y + p.fy * (P_RADIUS + M_RADIUS + 2);
+      this.motes.push(new Mote(p.idx, sx, sy, p.fx * M_SPEED, p.fy * M_SPEED));
+    }
+
+    if (p.dashT <= 0){
+      p.vx += ax * P_ACCEL * dt; p.vy += ay * P_ACCEL * dt;
+      const damp = Math.exp(-P_FRICTION * dt);
+      p.vx *= damp; p.vy *= damp;
+      const s = len(p.vx, p.vy);
+      if (s > P_MAXSPEED){ p.vx = p.vx/s*P_MAXSPEED; p.vy = p.vy/s*P_MAXSPEED; }
+    }
+
+    p.x += p.vx * dt; p.y += p.vy * dt;
+
+    const b = this.bounds();
+    if (p.x < b.x + P_RADIUS){ p.x = b.x + P_RADIUS; p.vx = 0; }
+    if (p.x > b.x + b.w - P_RADIUS){ p.x = b.x + b.w - P_RADIUS; p.vx = 0; }
+    if (p.y < b.y + P_RADIUS){ p.y = b.y + P_RADIUS; p.vy = 0; }
+    if (p.y > b.y + b.h - P_RADIUS){ p.y = b.y + b.h - P_RADIUS; p.vy = 0; }
+
+    for (const w of this.walls){
+      const axis = resolveCircleRect(p, w, P_RADIUS);
+      if (axis === "x") p.vx = 0; else if (axis === "y") p.vy = 0;
+    }
+  }
+
+  stepMotes(dt){
+    const STEPS = 4, h = dt / STEPS;
+    for (const mo of this.motes){
+      if (mo.dead) continue;
+      mo.age += dt;
+      if (!mo.armed && mo.age >= M_ARM_TIME) mo.armed = true;
+      if (mo.age >= M_LIFE) { this.fizzle(mo); continue; }
+
+      mo.trail.push(mo.x, mo.y);
+      if (mo.trail.length > 16) mo.trail.splice(0, mo.trail.length - 16);
+
+      for (let s=0; s<STEPS && !mo.dead; s++){
+        mo.x += mo.vx * h; mo.y += mo.vy * h;
+
+        const b = this.bounds();
+        if (mo.x < b.x + M_RADIUS){ mo.x = b.x + M_RADIUS; mo.vx = -mo.vx; this.onBounce(mo); }
+        else if (mo.x > b.x + b.w - M_RADIUS){ mo.x = b.x + b.w - M_RADIUS; mo.vx = -mo.vx; this.onBounce(mo); }
+        if (mo.y < b.y + M_RADIUS){ mo.y = b.y + M_RADIUS; mo.vy = -mo.vy; this.onBounce(mo); }
+        else if (mo.y > b.y + b.h - M_RADIUS){ mo.y = b.y + b.h - M_RADIUS; mo.vy = -mo.vy; this.onBounce(mo); }
+
+        for (const w of this.walls){
+          const axis = resolveCircleRect(mo, w, M_RADIUS);
+          if (!axis) continue;
+          if (w.void){ this.burst(mo.x, mo.y, "#5a6b80", 8); this.kill(mo); break; }
+          if (axis === "x") mo.vx = -mo.vx; else mo.vy = -mo.vy;
+          this.onBounce(mo);
+        }
+      }
+      if (mo.dead) continue;
+
+      // Parry: a live guard in front of a keeper catches the mote and
+      // sends it back along whatever direction that keeper is facing.
+      for (const p of this.players){
+        if (!p.alive || p.parryT <= 0) continue;
+        const dx = mo.x - p.x, dy = mo.y - p.y, d = len(dx,dy);
+        if (d > PARRY_REACH + M_RADIUS) continue;
+        let a = Math.atan2(dy,dx) - p.facing;
+        a = Math.atan2(Math.sin(a), Math.cos(a));
+        if (Math.abs(a) > PARRY_ARC/2) continue;
+        mo.owner = p.idx; mo.armed = true; mo.bounces = 0;
+        mo.vx = p.fx * M_SPEED_PARRY; mo.vy = p.fy * M_SPEED_PARRY;
+        mo.x = p.x + p.fx * (P_RADIUS + M_RADIUS + 3);
+        mo.y = p.y + p.fy * (P_RADIUS + M_RADIUS + 3);
+        mo.trail.length = 0;
+        p.flash = 0.22; p.parryT = 0; this.shake = Math.max(this.shake, 0.35);
+        this.burst(mo.x, mo.y, KEEPERS[p.idx].color, 16);
+        break;
+      }
+    }
+    this.motes = this.motes.filter(m => !m.dead);
+  }
+
+  onBounce(mo){
+    mo.armed = true;                 // after one wall, it belongs to nobody
+    mo.bounces++;
+    mo.trail.length = 0;
+    this.burst(mo.x, mo.y, "#cfe6ff", 4);
+    if (mo.bounces > M_MAX_BOUNCE) this.fizzle(mo);
+  }
+
+  fizzle(mo){
+    this.burst(mo.x, mo.y, "#8fa3bb", 6);
+    this.kill(mo);
+  }
+
+  kill(mo){
+    if (mo.dead) return;
+    mo.dead = true;
+    this.players[mo.owner].reloads.push(RELOAD_TIME);
+  }
+
+  checkDeaths(){
+    if (this.result) return;
+    const dead = [false,false];
+
+    for (const p of this.players){
+      if (!p.alive) continue;
+      const b = this.bounds();
+      if (p.x < b.x || p.x > b.x+b.w || p.y < b.y || p.y > b.y+b.h) dead[p.idx] = true;
+      for (const mo of this.motes){
+        if (mo.dead) continue;
+        if (!mo.armed && mo.owner === p.idx) continue;   // your own shot is inert until it arms
+        if (len(mo.x-p.x, mo.y-p.y) <= P_RADIUS + M_RADIUS){
+          dead[p.idx] = true; mo.dead = true;
+        }
+      }
+    }
+    if (!dead[0] && !dead[1]) return;
+
+    for (let i=0;i<2;i++) if (dead[i]){
+      this.players[i].alive = false;
+      this.burst(this.players[i].x, this.players[i].y, KEEPERS[i].color, 46, 260);
+    }
+    this.shake = 1;
+    const winner = dead[0] && dead[1] ? -1 : (dead[0] ? 1 : 0);
+    this.result = { winner };
+    if (winner >= 0) this.scores[winner]++;
+  }
+
+  /* cosmetic only — never touched by anything the outcome depends on */
+  burst(x,y,color,n,spd=150){
+    for (let i=0;i<n;i++){
+      const a = Math.random()*Math.PI*2, s = spd*(0.25+Math.random()*0.9);
+      this.sparks.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:0.35+Math.random()*0.4,t:0,color});
+    }
+  }
+  stepSparks(dt){
+    for (let i=this.sparks.length-1;i>=0;i--){
+      const s = this.sparks[i];
+      s.t += dt;
+      if (s.t >= s.life){ this.sparks.splice(i,1); continue; }
+      s.x += s.vx*dt; s.y += s.vy*dt;
+      s.vx *= 0.94; s.vy *= 0.94;
+    }
+  }
+
+  /* ---------- network snapshot (host -> guest) ---------- */
+  snapshot(){
+    return {
+      r:this.round, t:this.time, e:this.encroach, sc:this.scores,
+      res:this.result ? this.result.winner : null,
+      p:this.players.map(p => [
+        Math.round(p.x*10)/10, Math.round(p.y*10)/10,
+        Math.round(p.fx*100)/100, Math.round(p.fy*100)/100,
+        p.alive?1:0, p.ammo,
+        Math.round(p.parryT*100)/100, Math.round(p.dashCd*100)/100,
+        Math.round(p.parryCd*100)/100, Math.round(p.flash*100)/100 ]),
+      m:this.motes.map(m => [
+        Math.round(m.x*10)/10, Math.round(m.y*10)/10,
+        Math.round(m.vx), Math.round(m.vy), m.owner, m.armed?1:0 ]),
+      sh:Math.round(this.shake*100)/100,
+    };
+  }
+
+  applySnapshot(s){
+    if (s.r !== this.round) this.loadRound(s.r);
+    this.time = s.t; this.encroach = s.e; this.scores = s.sc;
+    this.shake = s.sh;
+    this.result = s.res === null ? null : { winner:s.res };
+    s.p.forEach((a,i) => {
+      const p = this.players[i];
+      p.x=a[0]; p.y=a[1]; p.fx=a[2]; p.fy=a[3]; p.alive=!!a[4];
+      p.ammo=a[5]; p.parryT=a[6]; p.dashCd=a[7]; p.parryCd=a[8]; p.flash=a[9];
+    });
+    // Rebuild motes, keeping trails for ones that persisted.
+    const old = this.motes;
+    this.motes = s.m.map((a,i) => {
+      const mo = new Mote(a[4], a[0], a[1], a[2], a[3]);
+      mo.armed = !!a[5];
+      if (old[i]) mo.trail = old[i].trail;
+      mo.trail.push(mo.x, mo.y);
+      if (mo.trail.length > 16) mo.trail.splice(0, mo.trail.length - 16);
+      return mo;
+    });
+  }
+}
+
+/* ============================================================
+   RENDER
+   ============================================================ */
+function drawRect(r, fill, top){
+  ctx.fillStyle = fill;
+  ctx.fillRect(r.x, r.y, r.w, r.h);
+  if (top){ ctx.fillStyle = top; ctx.fillRect(r.x, r.y, r.w, 2); }
+}
+
+function render(g, ui){
+  ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
+  ctx.clearRect(0,0,W,H);
+  ctx.save();
+
+  // ground
+  const grd = ctx.createRadialGradient(W/2, H/2, 40, W/2, H/2, W*0.75);
+  grd.addColorStop(0, "#132132"); grd.addColorStop(1, "#070b12");
+  ctx.fillStyle = grd; ctx.fillRect(0,0,W,H);
+
+  if (g.shake > 0){
+    const s = g.shake * 7;
+    ctx.translate((Math.random()*2-1)*s, (Math.random()*2-1)*s);
+  }
+
+  // tide grid
+  ctx.strokeStyle = "rgba(130,180,225,.075)"; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x=0;x<=W;x+=48){ ctx.moveTo(x+.5,0); ctx.lineTo(x+.5,H); }
+  for (let y=0;y<=H;y+=48){ ctx.moveTo(0,y+.5); ctx.lineTo(W,y+.5); }
+  ctx.stroke();
+
+  // walls
+  for (const w of g.walls){
+    if (w.void){
+      drawRect(w, "#03050a");
+      ctx.strokeStyle = "rgba(120,145,180,.7)"; ctx.setLineDash([5,5]);
+      ctx.strokeRect(w.x+.5, w.y+.5, w.w-1, w.h-1); ctx.setLineDash([]);
+    } else {
+      drawRect(w, "#26374b", "rgba(190,225,255,.75)");
+      ctx.strokeStyle = "rgba(150,190,230,.22)"; ctx.lineWidth = 1;
+      ctx.strokeRect(w.x+.5, w.y+.5, w.w-1, w.h-1);
+    }
+  }
+
+  // the closing dark
+  if (g.encroach > 0){
+    const e = g.encroach;
+    ctx.fillStyle = "rgba(2,3,6,.94)";
+    ctx.fillRect(0,0,W,e); ctx.fillRect(0,H-e,W,e);
+    ctx.fillRect(0,e,e,H-2*e); ctx.fillRect(W-e,e,e,H-2*e);
+    ctx.strokeStyle = "rgba(120,150,190,.5)"; ctx.lineWidth = 1;
+    ctx.strokeRect(e+.5, e+.5, W-2*e-1, H-2*e-1);
+  }
+
+  ctx.strokeStyle = "rgba(150,190,230,.18)"; ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, W-2, H-2);
+
+  // sparks
+  for (const s of g.sparks){
+    const a = 1 - s.t/s.life;
+    ctx.globalAlpha = a; ctx.fillStyle = s.color;
+    ctx.fillRect(s.x-1.5, s.y-1.5, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+
+  // motes
+  ctx.lineCap = "round";
+  for (const m of g.motes){
+    const col = m.armed ? "#ffffff" : KEEPERS[m.owner].color;
+    if (m.trail.length >= 4){
+      ctx.strokeStyle = KEEPERS[m.owner].color; ctx.globalAlpha = .28; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(m.trail[0], m.trail[1]);
+      for (let i=2;i<m.trail.length;i+=2) ctx.lineTo(m.trail[i], m.trail[i+1]);
+      ctx.lineTo(m.x, m.y); ctx.stroke(); ctx.globalAlpha = 1;
+    }
+    ctx.shadowBlur = m.armed ? 22 : 12;
+    ctx.shadowColor = KEEPERS[m.owner].color;
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(m.x, m.y, m.armed ? M_RADIUS : M_RADIUS-1, 0, 7); ctx.fill();
+    ctx.shadowBlur = 0;
+    if (!m.armed){
+      ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(m.x, m.y, M_RADIUS+3, 0, 7); ctx.stroke();
+    }
+  }
+
+  // keepers
+  for (const p of g.players){
+    const k = KEEPERS[p.idx];
+    if (!p.alive) continue;
+
+    if (p.parryT > 0 || p.flash > 0){
+      const a = p.parryT > 0 ? 1 : p.flash/0.22;
+      ctx.globalAlpha = 0.25 + 0.6*a;
+      ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, PARRY_REACH, p.facing - PARRY_ARC/2, p.facing + PARRY_ARC/2);
+      ctx.stroke(); ctx.globalAlpha = 1;
+    }
+
+    ctx.shadowBlur = 26; ctx.shadowColor = k.color;
+    ctx.fillStyle = k.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, P_RADIUS, 0, 7); ctx.fill();
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = "#05080d";
+    ctx.beginPath(); ctx.arc(p.x, p.y, P_RADIUS-5, 0, 7); ctx.fill();
+
+    // the mirror: which way the shot and the guard will go
+    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(p.x + p.fx*(P_RADIUS-1), p.y + p.fy*(P_RADIUS-1));
+    ctx.lineTo(p.x + p.fx*(P_RADIUS+9), p.y + p.fy*(P_RADIUS+9));
+    ctx.stroke();
+
+    if (p.dashCd > DASH_COOLDOWN - DASH_TIME - 0.1){
+      ctx.globalAlpha = .35; ctx.strokeStyle = k.color; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(p.x, p.y, P_RADIUS+6, 0, 7); ctx.stroke(); ctx.globalAlpha = 1;
+    }
+  }
+
+  ctx.restore();
+  drawHUD(g, ui);
+}
+
+function bar(x,y,w,h,frac,color){
+  ctx.fillStyle = "rgba(255,255,255,.12)"; ctx.fillRect(x,y,w,h);
+  ctx.fillStyle = color; ctx.fillRect(x,y,w*clamp(frac,0,1),h);
+}
+
+function drawHUD(g, ui){
+  ctx.font = "600 12px ui-monospace,SFMono-Regular,Menlo,monospace";
+  ctx.textBaseline = "top";
+
+  for (let i=0;i<2;i++){
+    const p = g.players[i], k = KEEPERS[i];
+    const rightSide = i === 1;
+    const x = rightSide ? W-24 : 24;
+    ctx.textAlign = rightSide ? "right" : "left";
+
+    ctx.fillStyle = k.color;
+    ctx.fillText(k.name, x, 16);
+
+    // score pips
+    for (let s=0;s<WINS_NEEDED;s++){
+      const px = rightSide ? x - 8 - s*16 : x + 4 + s*16;
+      ctx.beginPath(); ctx.arc(px, 42, 5, 0, 7);
+      if (s < g.scores[i]){ ctx.fillStyle = k.color; ctx.fill(); }
+      else { ctx.strokeStyle = "rgba(255,255,255,.25)"; ctx.lineWidth = 1; ctx.stroke(); }
+    }
+    // ammo pips
+    for (let a=0;a<AMMO;a++){
+      const px = rightSide ? x - 6 - a*12 : x + 6 + a*12;
+      ctx.beginPath(); ctx.arc(px, 62, 3.2, 0, 7);
+      if (a < p.ammo){ ctx.fillStyle = "#e9f2ff"; ctx.fill(); }
+      else { ctx.strokeStyle = "rgba(255,255,255,.22)"; ctx.stroke(); }
+    }
+    const bx = rightSide ? x - 84 : x;
+    bar(bx, 76, 84, 3, 1 - p.parryCd/PARRY_COOLDOWN, "rgba(255,255,255,.65)");
+    bar(bx, 83, 84, 3, 1 - p.dashCd/DASH_COOLDOWN,  k.color);
+  }
+
+  ctx.textAlign = "center";
+  ctx.fillStyle = "rgba(210,225,245,.55)";
+  ctx.fillText(g.arena.name.toUpperCase(), W/2, 16);
+
+  const left = ROUND_TIME - g.time;
+  if (left > 0){
+    ctx.fillStyle = left < 10 ? "#ffb347" : "rgba(210,225,245,.4)";
+    ctx.fillText("THE DARK IN " + Math.ceil(left), W/2, 34);
+  } else {
+    ctx.fillStyle = "#ff7a6b";
+    ctx.fillText("THE DARK IS CLOSING", W/2, 34);
+  }
+
+  if (ui.netLabel){
+    ctx.textAlign = "center";
+    ctx.fillStyle = "rgba(160,180,205,.5)";
+    ctx.fillText(ui.netLabel, W/2, H-24);
+  }
+}
+
+/* ============================================================
+   OVERLAY CARDS
+   ============================================================ */
+function show(html){ overlay.innerHTML = `<div class="card">${html}</div>`; overlay.classList.add("on"); }
+function hide(){ overlay.classList.remove("on"); overlay.innerHTML = ""; }
+
+const CONTROLS_HTML = (both) => `
+  <div class="keys">
+    <section>
+      <h3 class="ines">${both ? "Ines — left side" : "You"}</h3>
+      <dl><dt>W A S D</dt><dd>move &amp; aim</dd>
+          <dt>Space</dt><dd>fire</dd>
+          <dt>Q</dt><dd>guard / parry</dd>
+          <dt>E</dt><dd>dash</dd></dl>
+    </section>
+    ${both ? `<section>
+      <h3 class="cato">Cato — right side</h3>
+      <dl><dt>&uarr; &darr; &larr; &rarr;</dt><dd>move &amp; aim</dd>
+          <dt>. period</dt><dd>fire</dd>
+          <dt>, comma</dt><dd>guard / parry</dd>
+          <dt>/ slash</dt><dd>dash</dd></dl>
+    </section>` : `<section>
+      <h3>Rules</h3>
+      <dl><dt>Aim</dt><dd>is your movement direction</dd>
+          <dt>Motes</dt><dd>arm after one bounce — then they kill you too</dd>
+          <dt>Parry</dt><dd>sends a mote wherever you face</dd></dl>
+    </section>`}
+  </div>`;
+
+function menuCard(){
+  show(`
+    <div class="kicker">A duel for one lamp</div>
+    <h1>SALT&nbsp;LINE</h1>
+    <p>The sea took the coast in a single winter. What is left is a tower, a lamp,
+       and two sisters who each know how to keep it.</p>
+    <p>Mirrors at dusk. First to ${WINS_NEEDED} rounds keeps the light.</p>
+    <div class="rule"></div>
+    <p class="hint"><b>1</b> — two players, one keyboard &nbsp;·&nbsp;
+       <b>2</b> — host an online duel &nbsp;·&nbsp;
+       <b>3</b> — join with a code</p>
+    ${CONTROLS_HTML(true)}
+    <p class="hint" style="margin-top:22px">Every mote you fire arms after its first wall.
+       After that it does not care whose it was.</p>
+  `);
+}
+
+function beatCard(i, resultLine){
+  const b = BEATS[i % BEATS.length], k = KEEPERS[b.who];
+  show(`
+    ${resultLine ? `<div class="kicker">${resultLine}</div>` : `<div class="kicker">Salt Line — round ${i+1}</div>`}
+    <h2 class="${k.cls}">${b.head}</h2>
+    <p class="speaker">From the log of ${k.name}</p>
+    ${b.lines.map(l => `<p>${l}</p>`).join("")}
+    <div class="rule"></div>
+    <p class="hint blink">Press <b>fire</b> to take your place — <kbd>Space</kbd>${netMode==="local"?` or <kbd>.</kbd>`:``}</p>
+  `);
+}
+
+function epilogueCard(winner, scores){
+  const e = EPILOGUE[winner], k = KEEPERS[winner];
+  show(`
+    <div class="kicker">${KEEPERS[0].name} ${scores[0]} — ${scores[1]} ${KEEPERS[1].name}</div>
+    <h2 class="${k.cls}">${e.head}</h2>
+    ${e.lines.map(l => `<p>${l}</p>`).join("")}
+    <div class="rule"></div>
+    <p class="hint blink">Press <b>fire</b> to begin again</p>
+  `);
+}
+
+/* ============================================================
+   NETWORK  —  serverless WebRTC. One player hosts and owns the
+   simulation; the other sends input and renders what it is told.
+   Signalling is done by copy-pasting one code each way, so the
+   game needs no backend of any kind.
+   ============================================================ */
+let netMode = "local";                 // "local" | "host" | "guest"
+let pc = null, ch = null, netNote = "";
+let localSeq  = { f:0, p:0, d:0, c:0 };      // guest: presses, as counters
+let remoteSeq = { f:0, p:0, d:0, c:0 };      // host: presses already applied
+let remotePkt = { a:[0,0], f:0, p:0, d:0, c:0 };
+let lastUiKey = "";
+
+const enc = o => btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(o)))).replace(/=+$/,"");
+const dec = s => JSON.parse(new TextDecoder().decode(
+  Uint8Array.from(atob(s.trim().replace(/\s+/g,"")), c => c.charCodeAt(0))));
+
+function newPC(){
+  const p = new RTCPeerConnection({ iceServers:[
+    { urls:["stun:stun.l.google.com:19302","stun:global.stun.twilio.com:3478"] } ] });
+  p.onconnectionstatechange = () => {
+    if (p.connectionState === "failed" || p.connectionState === "disconnected"){
+      netNote = "connection lost";
+      if (state !== ST.MENU) toMenu();
+    }
+  };
+  return p;
+}
+
+function iceComplete(p){
+  if (p.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise(res => {
+    const done = () => { p.removeEventListener("icegatheringstatechange", check); res(); };
+    const check = () => { if (p.iceGatheringState === "complete") done(); };
+    p.addEventListener("icegatheringstatechange", check);
+    setTimeout(done, 4000);            // good enough without trickle
+  });
+}
+
+function wireChannel(){
+  ch.binaryType = "arraybuffer";
+  ch.onopen = () => {
+    netNote = "";
+    if (netMode === "host") startMatch();
+    else show(`<div class="kicker">Connected</div><h2>Waiting for the host</h2>
+               <p>The duel begins as soon as they take their place.</p>`);
+  };
+  ch.onclose = () => { netNote = "the other keeper disconnected"; toMenu(); };
+  ch.onmessage = ev => {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+    if (netMode === "host" && msg.i){ remotePkt = msg.i; }
+    else if (netMode === "guest" && msg.s){ guestApply(msg.s, msg.u); }
+  };
+}
+
+function netCardShell(title, body, status){
+  show(`<div class="kicker">Online duel</div><h2>${title}</h2>${body}
+        <p class="hint" id="netstat">${status||""}</p>
+        <p class="hint">Press <kbd>Esc</kbd> to go back</p>`);
+}
+const TA = `style="width:100%;height:110px;background:#0b131c;color:#cfe0f2;border:1px solid #24374b;
+  border-radius:6px;padding:10px;font:500 11px/1.45 ui-monospace,monospace;resize:vertical"`;
+const BTNS = `style="margin:10px 8px 0 0;background:#132131;color:#e8eef7;border:1px solid #2b3a4d;
+  border-radius:6px;padding:9px 16px;font:600 12px/1 ui-monospace,monospace;letter-spacing:.12em;cursor:pointer"`;
+
+function setStat(t){ const el = document.getElementById("netstat"); if (el) el.textContent = t; }
+
+async function hostFlow(){
+  netMode = "host"; state = ST.NET;
+  netCardShell("Hosting", `<p>Making your invitation code…</p>`, "gathering network routes");
+  pc = newPC();
+  ch = pc.createDataChannel("duel", { ordered:false, maxRetransmits:0 });
+  wireChannel();
+  await pc.setLocalDescription(await pc.createOffer());
+  await iceComplete(pc);
+  if (netMode !== "host") return;
+  const code = enc({ t:pc.localDescription.type, s:pc.localDescription.sdp });
+
+  netCardShell("Hosting — you are <span class='ines'>INES</span>", `
+    <p><b>1.</b> Send this invitation code to the other keeper:</p>
+    <textarea ${TA} id="mine" readonly>${code}</textarea>
+    <button ${BTNS} id="copy">COPY CODE</button>
+    <p style="margin-top:18px"><b>2.</b> Paste the reply code they send back:</p>
+    <textarea ${TA} id="theirs" placeholder="their reply code"></textarea>
+    <button ${BTNS} id="go">CONNECT</button>`, "waiting for their reply");
+
+  document.getElementById("copy").onclick = () => {
+    const t = document.getElementById("mine"); t.select();
+    navigator.clipboard?.writeText(t.value).then(()=>setStat("code copied"), ()=>setStat("select and copy manually"));
+  };
+  document.getElementById("go").onclick = async () => {
+    try {
+      const a = dec(document.getElementById("theirs").value);
+      await pc.setRemoteDescription({ type:a.t, sdp:a.s });
+      setStat("connecting…");
+    } catch(e){ setStat("that code could not be read — check it was copied whole"); }
+  };
+}
+
+async function joinFlow(){
+  netMode = "guest"; state = ST.NET;
+  netCardShell("Joining — you are <span class='cato'>CATO</span>", `
+    <p><b>1.</b> Paste the host's invitation code:</p>
+    <textarea ${TA} id="theirs" placeholder="their invitation code"></textarea>
+    <button ${BTNS} id="go">GENERATE REPLY</button>`, "");
+
+  pc = newPC();
+  pc.ondatachannel = ev => { ch = ev.channel; wireChannel(); };
+
+  document.getElementById("go").onclick = async () => {
+    let offer;
+    try { offer = dec(document.getElementById("theirs").value); }
+    catch(e){ return setStat("that code could not be read — check it was copied whole"); }
+    setStat("building reply…");
+    await pc.setRemoteDescription({ type:offer.t, sdp:offer.s });
+    await pc.setLocalDescription(await pc.createAnswer());
+    await iceComplete(pc);
+    if (netMode !== "guest") return;
+    const code = enc({ t:pc.localDescription.type, s:pc.localDescription.sdp });
+    netCardShell("Joining — you are <span class='cato'>CATO</span>", `
+      <p><b>2.</b> Send this reply code back to the host, then wait:</p>
+      <textarea ${TA} id="mine" readonly>${code}</textarea>
+      <button ${BTNS} id="copy">COPY REPLY</button>`, "waiting for the host to connect");
+    document.getElementById("copy").onclick = () => {
+      const t = document.getElementById("mine"); t.select();
+      navigator.clipboard?.writeText(t.value).then(()=>setStat("reply copied"), ()=>setStat("select and copy manually"));
+    };
+  };
+}
+
+function netTeardown(){
+  try { ch && ch.close(); } catch {}
+  try { pc && pc.close(); } catch {}
+  ch = null; pc = null; netMode = "local";
+  localSeq = {f:0,p:0,d:0,c:0}; remoteSeq = {f:0,p:0,d:0,c:0};
+  remotePkt = { a:[0,0], f:0, p:0, d:0, c:0 };
+}
+
+function send(o){ if (ch && ch.readyState === "open") { try { ch.send(JSON.stringify(o)); } catch {} } }
+
+/* host: turn the guest's packet into one frame of input */
+function remoteInput(){
+  const i = blankInput();
+  i.ax = remotePkt.a[0]; i.ay = remotePkt.a[1];
+  for (const k of ["f","p","d","c"]){
+    if (remotePkt[k] > remoteSeq[k]){ remoteSeq[k]++; 
+      if (k==="f") i.fire = true; else if (k==="p") i.parry = true;
+      else if (k==="d") i.dash = true; else i.confirm = true; }
+  }
+  return i;
+}
+
+/* guest: sample the keyboard and bump a counter per press */
+function guestSend(){
+  const s = SCHEMES[0];
+  let ax = 0, ay = 0;
+  if (held.has(s.left)) ax -= 1; if (held.has(s.right)) ax += 1;
+  if (held.has(s.up))   ay -= 1; if (held.has(s.down))  ay += 1;
+  if (edge.has(s.fire))  localSeq.f++;
+  if (edge.has(s.parry)) localSeq.p++;
+  if (edge.has(s.dash))  localSeq.d++;
+  if (edge.has(s.fire) || edge.has("Enter")) localSeq.c++;
+  send({ i:{ a:[ax,ay], f:localSeq.f, p:localSeq.p, d:localSeq.d, c:localSeq.c } });
+}
+
+function guestApply(s, u){
+  const wasAlive = game.players.map(p => p.alive);
+  const nMotes = game.motes.length;
+  const last = game.motes[nMotes-1];
+  const lastPos = last ? {x:last.x, y:last.y, o:last.owner} : null;
+
+  game.applySnapshot(s);
+
+  if (game.motes.length < nMotes && lastPos) game.burst(lastPos.x, lastPos.y, "#cfe6ff", 8);
+  for (let i=0;i<2;i++) if (wasAlive[i] && !game.players[i].alive)
+    game.burst(game.players[i].x, game.players[i].y, KEEPERS[i].color, 46, 260);
+
+  const key = JSON.stringify(u);
+  if (key !== lastUiKey){
+    lastUiKey = key;
+    state = u.st;
+    if (u.st === ST.CARD) beatCard(u.i, u.r);
+    else if (u.st === ST.EPI) epilogueCard(u.w, game.scores);
+    else if (u.st === ST.PLAY) hide();
+    else if (u.st === ST.MENU) menuCard();
+  }
+}
+
+/* ============================================================
+   STATE MACHINE
+   ============================================================ */
+const ST = { MENU:0, NET:1, CARD:2, PLAY:3, EPI:4 };
+let state = ST.MENU;
+let game = new Game();
+let cardIdx = 0, resultLine = "", epiWinner = 0;
+
+function uiPacket(){
+  return { st:state, i:cardIdx, r:resultLine, w:epiWinner };
+}
+
+function toMenu(){
+  state = ST.MENU; lastUiKey = "";
+  game = new Game();
+  netTeardown();
+  menuCard();
+  if (netNote){ const el = document.querySelector(".kicker"); if (el) el.textContent = netNote; netNote = ""; }
+}
+
+function startMatch(){
+  game = new Game();
+  cardIdx = 0; resultLine = "";
+  state = ST.CARD;
+  beatCard(0, "");
+}
+
+function beginRound(){
+  game.loadRound(cardIdx);
+  state = ST.PLAY;
+  hide();
+}
+
+function endOfRound(){
+  const w = game.result.winner;
+  if (w === -1){                                   // both lamps out: nobody profits
+    resultLine = "Simultaneous — the round is void";
+    beginRound();
+    return;
+  }
+  if (game.scores[w] >= WINS_NEEDED){
+    epiWinner = w; state = ST.EPI;
+    epilogueCard(w, game.scores);
+    return;
+  }
+  cardIdx++;
+  resultLine = `${KEEPERS[w].name} takes the round, ${ROUND_FLAVOR[Math.min(cardIdx-1, ROUND_FLAVOR.length-1)]}` +
+               ` — ${game.scores[0]}–${game.scores[1]}`;
+  state = ST.CARD;
+  beatCard(cardIdx, resultLine);
+}
+
+/* ============================================================
+   MAIN LOOP
+   ============================================================ */
+const FIXED = 1/120;
+let acc = 0, last = performance.now();
+
+function tick(now){
+  requestAnimationFrame(tick);
+  const dt = Math.min(0.1, (now - last)/1000); last = now;
+
+  if (edge.has("Escape") && (state !== ST.MENU)){ netNote = ""; toMenu(); edge.clear(); return; }
+
+  if (netMode === "guest"){
+    guestSend();
+    game.stepSparks(dt);
+    if (state === ST.PLAY) render(game, { netLabel:"ONLINE — you are CATO" });
+    edge.clear();
+    return;
+  }
+
+  switch (state){
+    case ST.MENU:
+      if (edge.has("Digit1") || edge.has("Numpad1")){ netMode = "local"; startMatch(); }
+      else if (edge.has("Digit2") || edge.has("Numpad2")) hostFlow();
+      else if (edge.has("Digit3") || edge.has("Numpad3")) joinFlow();
+      break;
+
+    case ST.NET:
+      break;
+
+    case ST.CARD: {
+      const go = netMode === "host" ? (anyConfirm() || remoteInput().confirm) : anyConfirm();
+      if (go) beginRound();
+      break;
+    }
+
+    case ST.PLAY: {
+      const inputs = netMode === "host"
+        ? [readInput(0), remoteInput()]
+        : [readInput(0), readInput(1)];
+
+      acc += dt;
+      let first = true;
+      while (acc >= FIXED){
+        game.step(FIXED, inputs);
+        acc -= FIXED;
+        if (first){                       // presses fire once, not once per substep
+          for (const i of inputs){ i.fire = i.parry = i.dash = false; }
+          first = false;
+        }
+      }
+      render(game, { netLabel: netMode === "host" ? "ONLINE — you are INES" : "" });
+      if (game.result && game.overTimer > 1.8) endOfRound();
+      break;
+    }
+
+    case ST.EPI:
+      if (netMode === "host" ? (anyConfirm() || remoteInput().confirm) : anyConfirm()){
+        if (netMode === "host") startMatch(); else toMenu();
+      }
+      break;
+  }
+
+  if (netMode === "host") send({ s:game.snapshot(), u:uiPacket() });
+  edge.clear();
+}
+
+menuCard();
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
