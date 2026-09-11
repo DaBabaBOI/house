@@ -9,8 +9,6 @@
     --bg:#06090f;
     --ink:#dfe7f2;
     --dim:#7b8899;
-    --ines:#ffb347;
-    --cato:#7fe8ff;
     --edge:#1b2735;
   }
   *{box-sizing:border-box;}
@@ -22,7 +20,7 @@
     box-shadow:0 0 0 1px #16202c, 0 24px 80px rgba(0,0,0,.8);}
   #overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
     padding:6vh 6vw;background:radial-gradient(ellipse at 50% 40%, rgba(8,12,20,.86), rgba(4,6,10,.97));
-    backdrop-filter:blur(2px);}
+    backdrop-filter:blur(2px);overflow:auto;}
   #overlay.on{display:flex;}
   .card{max-width:760px;width:100%;animation:rise .5s ease both;}
   @keyframes rise{from{opacity:0;transform:translateY(14px);}to{opacity:1;transform:none;}}
@@ -33,7 +31,6 @@
   p{font-size:clamp(15px,1.9vw,19px);line-height:1.62;margin:0 0 14px;color:#c3cedd;max-width:62ch;}
   p.speaker{font:600 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.28em;
     text-transform:uppercase;color:var(--dim);margin-bottom:12px;}
-  .ines{color:var(--ines);} .cato{color:var(--cato);}
   .hint{margin-top:28px;font:500 13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
     letter-spacing:.16em;color:var(--dim);text-transform:uppercase;}
   .hint b{color:var(--ink);font-weight:600;}
@@ -59,10 +56,12 @@
 <script>
 "use strict";
 /* ============================================================
-   SALT LINE — a two-player, local-hotseat mirror duel.
+   SALT LINE — a two-player mirror duel, local or online.
+
    Design rule: nothing in the simulation is random. Every
    outcome comes from positioning, aim, timing, and reading
-   your opponent. (Randomness is used for cosmetic sparks only.)
+   your opponent. Math.random is used for spark particles only,
+   and those touch nothing that decides a round.
    ============================================================ */
 
 const W = 960, H = 600;
@@ -86,34 +85,84 @@ function fitCanvas(){
 addEventListener("resize", fitCanvas);
 fitCanvas();
 
-/* ---------- tuning ---------- */
-const P_RADIUS      = 13;
-const P_ACCEL       = 2600;   // px/s^2
-const P_MAXSPEED    = 265;
-const P_FRICTION    = 9.0;    // exponential damping
-const DASH_SPEED    = 760;
-const DASH_TIME     = 0.16;
-const DASH_COOLDOWN = 1.35;
+/* ---------- shared tuning ---------- */
+const BASE = {
+  accel:2600, maxSpeed:265, friction:9.0, radius:13,
+  dashSpeed:760, dashTime:0.16, dashCd:1.35,
+  ammo:3, fireCd:0.22, reload:0.9,
+  moteSpeed:520, moteRadius:5, moteBounces:5, moteLife:6.0, armTime:0.45,
+  parryTime:0.14, parryCd:0.9, parryReach:38, parryArc:Math.PI*0.62, returnSpeed:660,
+  bounceGain:1,                      // velocity multiplier applied on each bounce
+};
 
-const M_RADIUS      = 5;
-const M_SPEED       = 520;
-const M_SPEED_PARRY = 660;
-const M_MAX_BOUNCE  = 5;
-const M_LIFE        = 6.0;
-const M_ARM_TIME    = 0.45;   // a mote goes live even without bouncing
-const AMMO          = 3;
-const FIRE_COOLDOWN = 0.22;
-const RELOAD_TIME   = 0.9;    // after a mote fizzles, before the shot returns
+const ROUND_TIME  = 45;    // seconds before the dark starts closing
+const CLOSE_STEP  = 1.4;
+const CLOSE_AMOUNT= 24;
+const WINS_NEEDED = 3;
 
-const PARRY_TIME    = 0.14;
-const PARRY_COOLDOWN= 0.9;
-const PARRY_REACH   = 38;
-const PARRY_ARC     = Math.PI * 0.62;  // total width of the guard arc
+/* Charge is earned by skill, never by waiting: parries, keeping your own
+   motes alive off the walls, and slipping past a live one. */
+const CHG_FULL   = 100;
+const CHG_PARRY  = 45;
+const CHG_BOUNCE = 10;     // per bounce of a mote you own, first 3 only
+const CHG_MISS   = 20;     // an armed mote passes close and does not hit you
 
-const ROUND_TIME    = 45;     // seconds before the dark starts closing
-const CLOSE_STEP    = 1.4;    // seconds between encroachments
-const CLOSE_AMOUNT  = 24;     // px per encroachment
-const WINS_NEEDED   = 3;
+/* ============================================================
+   THE KEEPERS
+   Each holds a different tower and a different mirror-craft.
+   ============================================================ */
+const CHARS = [
+  { id:"ines", name:"INES", title:"The Lampwright", color:"#ffb347",
+    passive:"Steady hand — motes fly faster, and spent shots come back sooner.",
+    special:"SECOND WICK", specialText:"Fires three motes in a tight fan.",
+    ending:"keeps the wick trimmed so low it burns a hundred years on nothing.",
+    stats:{ moteSpeed:575, reload:0.6 } },
+
+  { id:"cato", name:"CATO", title:"The Tidewatcher", color:"#7fe8ff",
+    passive:"Undertow — a longer, faster dash on a shorter leash.",
+    special:"EBB", specialText:"Snap back to where you stood a moment ago.",
+    ending:"learns the tide so well the tide starts keeping time by her.",
+    stats:{ dashSpeed:880, dashTime:0.19, dashCd:0.95 } },
+
+  { id:"meran", name:"MERAN", title:"The Glassblower", color:"#9df5c0",
+    passive:"Annealed — a wide guard that recovers fast, but only two motes.",
+    special:"PRISM", specialText:"Your next mote splits in three on its first wall.",
+    ending:"blows a lens so true the beam reaches the far shore, and is answered.",
+    stats:{ ammo:2, parryArc:Math.PI*0.92, parryCd:0.6, parryReach:44 } },
+
+  { id:"odall", name:"ODALL", title:"The Wrecker", color:"#ff8a6b",
+    passive:"Heavy glass — slow, fat motes that ride the walls far longer.",
+    special:"BREAKWATER", specialText:"Raise a wall of slag in front of you.",
+    ending:"pulls the dead ships off the rocks one winter at a time, and stops counting.",
+    stats:{ maxSpeed:232, accel:2300, moteSpeed:415, moteRadius:9, moteBounces:9, moteLife:8 } },
+
+  { id:"silt", name:"SILT", title:"The Mudlark", color:"#c9d66b",
+    passive:"Small — a smaller target and quicker feet, but a slower trigger.",
+    special:"DUCK UNDER", specialText:"Light passes through you. No shooting, no guard.",
+    ending:"goes on finding things in the mud that the flood was supposed to have kept.",
+    stats:{ radius:10, maxSpeed:298, accel:2850, fireCd:0.42, reload:1.15 } },
+
+  { id:"vane", name:"VANE", title:"The Signalman", color:"#c4a6ff",
+    passive:"Long focus — motes live longer and gather speed off every wall.",
+    special:"RECALL", specialText:"Every mote you own turns around where it is.",
+    ending:"sends one message a year to a coast that has nobody left to read it.",
+    stats:{ moteLife:9.5, moteBounces:6, bounceGain:1.085 } },
+
+  { id:"keel", name:"KEEL", title:"The Bellringer", color:"#8fb6d9",
+    passive:"Toll — parried motes come off the mirror hard, on a tighter window.",
+    special:"RINGING", specialText:"A ring of sound throws every mote away from you.",
+    ending:"rings the hours for a town that drowned, because the hours still pass.",
+    stats:{ parryTime:0.105, returnSpeed:930, parryCd:0.8 } },
+
+  { id:"auger", name:"AUGER", title:"The Welldigger", color:"#e0c36a",
+    passive:"Dowser — you see the line your shot will take, two walls ahead.",
+    special:"SINKHOLE", specialText:"Open a hole in the floor that drinks light.",
+    ending:"digs down past the door under the cistern and does not write what is there.",
+    stats:{ moteSpeed:495, fireCd:0.26 } },
+];
+CHARS.forEach(c => c.st = Object.assign({}, BASE, c.stats));
+
+const DEFAULT_PICKS = [0, 1];           // Ines and Cato hold the tower in the story
 
 /* ---------- arenas (all 180deg-rotationally symmetric: no side has an edge) ---------- */
 const ARENAS = [
@@ -146,26 +195,21 @@ const ARENAS = [
     spawns:[[120,120],[840,480]] },
 ];
 
-/* ---------- story ---------- */
-const KEEPERS = [
-  { name:"INES", color:"#ffb347", cls:"ines" },
-  { name:"CATO", color:"#7fe8ff", cls:"cato" },
-];
-
-// One beat per round. beats[i] plays before round i+1.
+/* ---------- story ----------
+   The logs belong to whoever is holding each seat, so they name nobody. */
 const BEATS = [
   { head:"Dusk, the first night", who:0, lines:[
     "The lamp takes one keeper. The Order was clear about that, and the Order is thirty years drowned, so the rule is only habit now. Habit is most of what holds this coast together.",
     "So we do it the old way. Mirrors, at dusk, until one of us can't stand. The loser walks the salt line inland at low tide and does not come back.",
-    "I packed her bag this morning. She'll call that arrogance. It's just hope that I won't have to hand it to her." ]},
+    "I packed the other bag this morning. They'll call that arrogance. It's just hope that I won't have to hand it over." ]},
 
   { head:"The ledger", who:1, lines:[
-    "Ines fights like the tower is already hers. It isn't.",
+    "The one across the room fights like the tower is already theirs. It isn't.",
     "I counted the oil tonight because I couldn't sleep. Nineteen drums in the ledger. Eleven in the cellar. Someone has been burning it somewhere that isn't up here.",
     "The lamp doesn't drink that much. Nothing above the waterline does." ]},
 
   { head:"Under the cistern", who:0, lines:[
-    "There is a door below the cistern with our grandmother's mark cut into it, and warmth coming through the gap at the bottom.",
+    "There is a door below the cistern with the first keeper's mark cut into it, and warmth coming through the gap at the bottom.",
     "Warm. In a flooded cellar. In February.",
     "I put my hand flat against it and something on the other side went quiet. Not away — quiet. The way you go quiet when you're listening for someone to do it again." ]},
 
@@ -180,19 +224,6 @@ const BEATS = [
     "Funny, how many years I spent trying to win." ]},
 ];
 
-const EPILOGUE = [
-  { head:"One light on the coast", who:0, lines:[
-    "Ines climbs. The wick catches on the second match and holds.",
-    "Below the cistern something turns over in its sleep and settles, the way a thing settles when it has decided it can wait.",
-    "Cato takes the salt line inland at low tide without once looking back — because Ines is watching, and a keeper who looks back is a keeper who comes back, and the tower holds one.",
-    "By morning there is a single light burning on eighty miles of drowned coast. There was only ever supposed to be one." ]},
-  { head:"One light on the coast", who:1, lines:[
-    "Cato climbs. Her hands shake on the wick for the first hour, and then they don't.",
-    "Ines walks out at low tide with the bag she packed days ago — she packed it for this outcome too, and told nobody, which is the closest thing to tenderness either of them managed.",
-    "Below the cistern the warmth fades to almost nothing. Almost.",
-    "By morning there is a single light burning on eighty miles of drowned coast. There was only ever supposed to be one." ]},
-];
-
 const ROUND_FLAVOR = [
   "the mirror holds",
   "a clean line",
@@ -205,7 +236,8 @@ const ROUND_FLAVOR = [
    INPUT
    ============================================================ */
 const held = new Set(), edge = new Set();
-const BLOCK = new Set(["Space","ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Slash","Period","Comma","KeyQ","KeyE"]);
+const BLOCK = new Set(["Space","ArrowUp","ArrowDown","ArrowLeft","ArrowRight",
+                       "Slash","Period","Comma","Semicolon","KeyQ","KeyE","KeyF"]);
 
 const typing = e => {
   const t = e.target;
@@ -220,25 +252,32 @@ addEventListener("keydown", e => {
 addEventListener("keyup", e => held.delete(e.code));
 addEventListener("blur", () => { held.clear(); edge.clear(); });
 
+const hasHeld = k => Array.isArray(k) ? k.some(x => held.has(x)) : held.has(k);
+const hasEdge = k => Array.isArray(k) ? k.some(x => edge.has(x)) : edge.has(k);
+
 const SCHEMES = [
-  { up:"KeyW", down:"KeyS", left:"KeyA", right:"KeyD", fire:"Space", parry:"KeyQ", dash:"KeyE",
-    label:["W A S D","SPACE","Q","E"] },
-  { up:"ArrowUp", down:"ArrowDown", left:"ArrowLeft", right:"ArrowRight", fire:"Period", parry:"Comma", dash:"Slash",
-    label:["ARROWS",". (period)",", (comma)","/ (slash)"] },
+  { up:"KeyW", down:"KeyS", left:"KeyA", right:"KeyD",
+    fire:"Space", parry:"KeyQ", dash:"KeyE", special:["KeyF","KeyR"] },
+  { up:"ArrowUp", down:"ArrowDown", left:"ArrowLeft", right:"ArrowRight",
+    fire:"Period", parry:"Comma", dash:"Slash", special:["Semicolon","ShiftRight","Numpad0"] },
 ];
 
-function blankInput(){ return {ax:0, ay:0, fire:false, parry:false, dash:false, confirm:false}; }
+function blankInput(){
+  return {ax:0, ay:0, fire:false, parry:false, dash:false, special:false, confirm:false, back:false};
+}
 
 function readInput(schemeIndex){
   const s = SCHEMES[schemeIndex], i = blankInput();
-  if (held.has(s.left))  i.ax -= 1;
-  if (held.has(s.right)) i.ax += 1;
-  if (held.has(s.up))    i.ay -= 1;
-  if (held.has(s.down))  i.ay += 1;
-  i.fire  = edge.has(s.fire);
-  i.parry = edge.has(s.parry);
-  i.dash  = edge.has(s.dash);
+  if (hasHeld(s.left))  i.ax -= 1;
+  if (hasHeld(s.right)) i.ax += 1;
+  if (hasHeld(s.up))    i.ay -= 1;
+  if (hasHeld(s.down))  i.ay += 1;
+  i.fire    = hasEdge(s.fire);
+  i.parry   = hasEdge(s.parry);
+  i.dash    = hasEdge(s.dash);
+  i.special = hasEdge(s.special);
   i.confirm = i.fire || edge.has("Enter");
+  i.back    = i.parry;
   return i;
 }
 // Either player may advance a story card in local play.
@@ -276,57 +315,83 @@ function resolveCircleRect(c, r, rad){
 /* ============================================================
    SIMULATION
    ============================================================ */
+const EBB_FRAMES = 150;          // ~1.25s of position history at the fixed step
+
 class Player {
-  constructor(idx){ this.idx = idx; this.reset(0,0); }
+  constructor(idx){ this.idx = idx; this.charId = DEFAULT_PICKS[idx]; this.reset(0,0); }
+
   reset(x,y){
+    this.char = CHARS[this.charId];
+    this.st = this.char.st;
     this.x=x; this.y=y; this.vx=0; this.vy=0;
     this.fx = x < W/2 ? 1 : -1; this.fy = 0;   // facing, unit vector
     this.alive = true;
-    this.ammo = AMMO; this.reloads = [];
+    this.ammo = this.st.ammo; this.reloads = [];
     this.fireCd = 0; this.parryCd = 0; this.parryT = 0;
     this.dashCd = 0; this.dashT = 0;
-    this.flash = 0;
+    this.flash = 0; this.charge = 0; this.ghost = 0; this.burstT = 0;
+    this.primed = false;                        // Meran's prism is loaded
+    this.hist = [];
   }
   get facing(){ return Math.atan2(this.fy, this.fx); }
+  get ready(){ return this.charge >= CHG_FULL; }
+  addCharge(n){ this.charge = Math.min(CHG_FULL, this.charge + n); }
 }
 
+let MOTE_SEQ = 0;
 class Mote {
-  constructor(owner,x,y,vx,vy){
-    this.owner=owner; this.x=x; this.y=y; this.vx=vx; this.vy=vy;
+  constructor(p, x, y, vx, vy){
+    const st = p.st;
+    this.id = ++MOTE_SEQ;
+    this.owner = p.idx; this.x=x; this.y=y; this.vx=vx; this.vy=vy;
+    this.radius = st.moteRadius; this.maxBounces = st.moteBounces;
+    this.life = st.moteLife; this.armTime = st.armTime; this.gain = st.bounceGain;
     this.age=0; this.bounces=0; this.armed=false; this.dead=false;
+    this.split=false; this.given=0; this.miss=[false,false]; this.rings=[];
     this.trail=[];
   }
 }
 
 class Game {
-  constructor(){
+  constructor(picks){
     this.scores=[0,0];
     this.round=0;
     this.motes=[];
     this.players=[new Player(0), new Player(1)];
+    this.setPicks(picks || DEFAULT_PICKS);
     this.sparks=[];
     this.shake=0;
     this.loadRound(0);
   }
 
+  setPicks(picks){
+    this.players[0].charId = picks[0];
+    this.players[1].charId = picks[1];
+  }
+  get picks(){ return [this.players[0].charId, this.players[1].charId]; }
+
   loadRound(i){
     this.round = i;
     this.arena = ARENAS[i % ARENAS.length];
     this.walls = this.arena.walls.map(w => ({...w}));
+    this.temps = [];                 // walls conjured by specials
+    this.rings = [];
     this.motes.length = 0;
     this.sparks.length = 0;
     this.time = 0;
     this.encroach = 0;
     this.closeTimer = 0;
     this.overTimer = 0;
-    this.result = null;          // {winner:0|1|-1}
+    this.result = null;              // {winner:0|1|-1}
     const sp = this.arena.spawns;
     this.players[0].reset(sp[0][0], sp[0][1]);
     this.players[1].reset(sp[1][0], sp[1][1]);
     this.players[0].fx = 1; this.players[1].fx = -1;
   }
 
-  // Rect list including the closing dark, which motes bounce off.
+  // Every solid thing a mote or a keeper can meet, arena and conjured alike.
+  get obstacles(){ return this.walls.concat(this.temps); }
+
   bounds(){
     const e = this.encroach;
     return {x:e, y:e, w:W-2*e, h:H-2*e};
@@ -336,8 +401,17 @@ class Game {
     this.time += dt;
     if (this.shake > 0) this.shake = Math.max(0, this.shake - dt*3.5);
 
+    for (let i = this.temps.length - 1; i >= 0; i--){
+      this.temps[i].ttl -= dt;
+      if (this.temps[i].ttl <= 0) this.temps.splice(i,1);
+    }
+    for (let i = this.rings.length - 1; i >= 0; i--){
+      this.rings[i].t += dt;
+      if (this.rings[i].t >= this.rings[i].life) this.rings.splice(i,1);
+    }
+
     if (!this.result){
-      // The dark closes in so a stalemate is impossible without being decided.
+      // The dark closes in so a stalemate cannot simply be waited out.
       if (this.time > ROUND_TIME){
         this.closeTimer += dt;
         if (this.closeTimer >= CLOSE_STEP){
@@ -357,16 +431,22 @@ class Game {
 
   stepPlayer(p, inp, dt){
     if (!p.alive) return;
+    const st = p.st;
     p.fireCd  = Math.max(0, p.fireCd  - dt);
     p.parryCd = Math.max(0, p.parryCd - dt);
     p.dashCd  = Math.max(0, p.dashCd  - dt);
     p.parryT  = Math.max(0, p.parryT  - dt);
     p.dashT   = Math.max(0, p.dashT   - dt);
     p.flash   = Math.max(0, p.flash   - dt);
+    p.ghost   = Math.max(0, p.ghost   - dt);
+    p.burstT  = Math.max(0, p.burstT  - dt);
+
+    p.hist.push(p.x, p.y);
+    if (p.hist.length > EBB_FRAMES*2) p.hist.splice(0, p.hist.length - EBB_FRAMES*2);
 
     for (let i = p.reloads.length - 1; i >= 0; i--){
       p.reloads[i] -= dt;
-      if (p.reloads[i] <= 0){ p.reloads.splice(i,1); p.ammo = Math.min(AMMO, p.ammo + 1); }
+      if (p.reloads[i] <= 0){ p.reloads.splice(i,1); p.ammo = Math.min(st.ammo, p.ammo + 1); }
     }
 
     let ax = inp.ax, ay = inp.ay;
@@ -376,39 +456,112 @@ class Game {
       p.fx = ax; p.fy = ay;                 // aim is welded to movement: no free-look
     }
 
+    if (inp.special && p.ready){ p.charge = 0; p.burstT = 0.4; this.useSpecial(p); }
+
     if (inp.dash && p.dashCd <= 0){
-      p.vx = p.fx * DASH_SPEED; p.vy = p.fy * DASH_SPEED;
-      p.dashT = DASH_TIME; p.dashCd = DASH_COOLDOWN;
+      p.vx = p.fx * st.dashSpeed; p.vy = p.fy * st.dashSpeed;
+      p.dashT = st.dashTime; p.dashCd = st.dashCd;
     }
-    if (inp.parry && p.parryCd <= 0){
-      p.parryT = PARRY_TIME; p.parryCd = PARRY_COOLDOWN;
+    if (inp.parry && p.parryCd <= 0 && p.ghost <= 0){
+      p.parryT = st.parryTime; p.parryCd = st.parryCd;
     }
-    if (inp.fire && p.fireCd <= 0 && p.ammo > 0){
-      p.ammo--; p.fireCd = FIRE_COOLDOWN;
-      const sx = p.x + p.fx * (P_RADIUS + M_RADIUS + 2);
-      const sy = p.y + p.fy * (P_RADIUS + M_RADIUS + 2);
-      this.motes.push(new Mote(p.idx, sx, sy, p.fx * M_SPEED, p.fy * M_SPEED));
+    if (inp.fire && p.fireCd <= 0 && p.ammo > 0 && p.ghost <= 0){
+      p.ammo--; p.fireCd = st.fireCd;
+      const mo = this.spawnMote(p, 0);
+      if (p.primed){ mo.split = true; p.primed = false; }
     }
 
     if (p.dashT <= 0){
-      p.vx += ax * P_ACCEL * dt; p.vy += ay * P_ACCEL * dt;
-      const damp = Math.exp(-P_FRICTION * dt);
+      p.vx += ax * st.accel * dt; p.vy += ay * st.accel * dt;
+      const damp = Math.exp(-st.friction * dt);
       p.vx *= damp; p.vy *= damp;
       const s = len(p.vx, p.vy);
-      if (s > P_MAXSPEED){ p.vx = p.vx/s*P_MAXSPEED; p.vy = p.vy/s*P_MAXSPEED; }
+      if (s > st.maxSpeed){ p.vx = p.vx/s*st.maxSpeed; p.vy = p.vy/s*st.maxSpeed; }
     }
 
     p.x += p.vx * dt; p.y += p.vy * dt;
+    this.confinePlayer(p);
+  }
 
-    const b = this.bounds();
-    if (p.x < b.x + P_RADIUS){ p.x = b.x + P_RADIUS; p.vx = 0; }
-    if (p.x > b.x + b.w - P_RADIUS){ p.x = b.x + b.w - P_RADIUS; p.vx = 0; }
-    if (p.y < b.y + P_RADIUS){ p.y = b.y + P_RADIUS; p.vy = 0; }
-    if (p.y > b.y + b.h - P_RADIUS){ p.y = b.y + b.h - P_RADIUS; p.vy = 0; }
-
-    for (const w of this.walls){
-      const axis = resolveCircleRect(p, w, P_RADIUS);
+  confinePlayer(p){
+    const rad = p.st.radius, b = this.bounds();
+    if (p.x < b.x + rad){ p.x = b.x + rad; p.vx = 0; }
+    if (p.x > b.x + b.w - rad){ p.x = b.x + b.w - rad; p.vx = 0; }
+    if (p.y < b.y + rad){ p.y = b.y + rad; p.vy = 0; }
+    if (p.y > b.y + b.h - rad){ p.y = b.y + b.h - rad; p.vy = 0; }
+    for (const w of this.obstacles){
+      const axis = resolveCircleRect(p, w, rad);
       if (axis === "x") p.vx = 0; else if (axis === "y") p.vy = 0;
+    }
+  }
+
+  spawnMote(p, angleOffset){
+    const a = p.facing + angleOffset;
+    const dx = Math.cos(a), dy = Math.sin(a);
+    const off = p.st.radius + p.st.moteRadius + 2;
+    const mo = new Mote(p, p.x + dx*off, p.y + dy*off, dx*p.st.moteSpeed, dy*p.st.moteSpeed);
+    this.motes.push(mo);
+    return mo;
+  }
+
+  /* ---------- the specials ---------- */
+  useSpecial(p){
+    const st = p.st;
+    this.burst(p.x, p.y, p.char.color, 26, 220);
+    switch (p.char.id){
+
+      case "ines":                       // SECOND WICK — three at once, free of ammo
+        this.spawnMote(p, -0.30); this.spawnMote(p, 0); this.spawnMote(p, 0.30);
+        break;
+
+      case "cato": {                     // EBB — step back into your own past
+        if (p.hist.length >= 2){
+          p.x = p.hist[0]; p.y = p.hist[1];
+          p.vx = 0; p.vy = 0; p.hist.length = 0;
+          this.confinePlayer(p);
+          this.burst(p.x, p.y, p.char.color, 24, 200);
+        }
+        break;
+      }
+
+      case "meran":                      // PRISM — load the next shot
+        p.primed = true;
+        break;
+
+      case "odall": {                    // BREAKWATER — raise a wall of slag
+        const horiz = Math.abs(p.fx) >= Math.abs(p.fy);
+        const w = horiz ? 16 : 96, h = horiz ? 96 : 16;
+        this.temps.push({ x: clamp(p.x + p.fx*52 - w/2, 2, W-w-2),
+                          y: clamp(p.y + p.fy*52 - h/2, 2, H-h-2),
+                          w, h, ttl:5, owner:p.idx });
+        break;
+      }
+
+      case "silt":                       // DUCK UNDER — let the light pass through
+        p.ghost = 0.7;
+        break;
+
+      case "vane":                       // RECALL — every mote of yours turns around
+        for (const mo of this.motes){
+          if (mo.owner !== p.idx || mo.dead) continue;
+          mo.vx = -mo.vx; mo.vy = -mo.vy;
+          mo.armed = true; mo.trail.length = 0;
+          this.burst(mo.x, mo.y, p.char.color, 8);
+        }
+        break;
+
+      case "keel":                       // RINGING — throw everything outward
+        this.rings.push({ id:++MOTE_SEQ, x:p.x, y:p.y, t:0, life:0.42, owner:p.idx });
+        this.shake = Math.max(this.shake, 0.5);
+        break;
+
+      case "auger": {                    // SINKHOLE — a hole that drinks light
+        const s = 74;
+        this.temps.push({ x: clamp(p.x + p.fx*62 - s/2, 2, W-s-2),
+                          y: clamp(p.y + p.fy*62 - s/2, 2, H-s-2),
+                          w:s, h:s, ttl:6, void:true, owner:p.idx });
+        break;
+      }
     }
   }
 
@@ -417,8 +570,8 @@ class Game {
     for (const mo of this.motes){
       if (mo.dead) continue;
       mo.age += dt;
-      if (!mo.armed && mo.age >= M_ARM_TIME) mo.armed = true;
-      if (mo.age >= M_LIFE) { this.fizzle(mo); continue; }
+      if (!mo.armed && mo.age >= mo.armTime) mo.armed = true;
+      if (mo.age >= mo.life) { this.fizzle(mo); continue; }
 
       mo.trail.push(mo.x, mo.y);
       if (mo.trail.length > 16) mo.trail.splice(0, mo.trail.length - 16);
@@ -426,38 +579,53 @@ class Game {
       for (let s=0; s<STEPS && !mo.dead; s++){
         mo.x += mo.vx * h; mo.y += mo.vy * h;
 
-        const b = this.bounds();
-        if (mo.x < b.x + M_RADIUS){ mo.x = b.x + M_RADIUS; mo.vx = -mo.vx; this.onBounce(mo); }
-        else if (mo.x > b.x + b.w - M_RADIUS){ mo.x = b.x + b.w - M_RADIUS; mo.vx = -mo.vx; this.onBounce(mo); }
-        if (mo.y < b.y + M_RADIUS){ mo.y = b.y + M_RADIUS; mo.vy = -mo.vy; this.onBounce(mo); }
-        else if (mo.y > b.y + b.h - M_RADIUS){ mo.y = b.y + b.h - M_RADIUS; mo.vy = -mo.vy; this.onBounce(mo); }
+        const b = this.bounds(), r = mo.radius;
+        if (mo.x < b.x + r){ mo.x = b.x + r; mo.vx = -mo.vx; this.onBounce(mo); }
+        else if (mo.x > b.x + b.w - r){ mo.x = b.x + b.w - r; mo.vx = -mo.vx; this.onBounce(mo); }
+        if (mo.y < b.y + r){ mo.y = b.y + r; mo.vy = -mo.vy; this.onBounce(mo); }
+        else if (mo.y > b.y + b.h - r){ mo.y = b.y + b.h - r; mo.vy = -mo.vy; this.onBounce(mo); }
 
-        for (const w of this.walls){
-          const axis = resolveCircleRect(mo, w, M_RADIUS);
+        for (const w of this.obstacles){
+          const axis = resolveCircleRect(mo, w, r);
           if (!axis) continue;
-          if (w.void){ this.burst(mo.x, mo.y, "#5a6b80", 8); this.kill(mo); break; }
+          if (w.void){ this.burst(mo.x, mo.y, "#5a6b80", 10); this.kill(mo); break; }
           if (axis === "x") mo.vx = -mo.vx; else mo.vy = -mo.vy;
           this.onBounce(mo);
         }
       }
       if (mo.dead) continue;
 
+      // Keel's ring throws motes outward as it passes over them.
+      for (const ring of this.rings){
+        if (mo.rings.includes(ring.id)) continue;
+        const rad = 210 * (ring.t / ring.life);
+        const dx = mo.x - ring.x, dy = mo.y - ring.y, d = len(dx,dy) || 1;
+        if (d > rad) continue;
+        mo.rings.push(ring.id);
+        const sp = Math.max(len(mo.vx, mo.vy), 620);
+        mo.vx = dx/d * sp; mo.vy = dy/d * sp;
+        mo.owner = ring.owner; mo.armed = true; mo.trail.length = 0;
+        this.burst(mo.x, mo.y, CHARS[this.players[ring.owner].charId].color, 10);
+      }
+
       // Parry: a live guard in front of a keeper catches the mote and
       // sends it back along whatever direction that keeper is facing.
       for (const p of this.players){
         if (!p.alive || p.parryT <= 0) continue;
         const dx = mo.x - p.x, dy = mo.y - p.y, d = len(dx,dy);
-        if (d > PARRY_REACH + M_RADIUS) continue;
+        if (d > p.st.parryReach + mo.radius) continue;
         let a = Math.atan2(dy,dx) - p.facing;
         a = Math.atan2(Math.sin(a), Math.cos(a));
-        if (Math.abs(a) > PARRY_ARC/2) continue;
+        if (Math.abs(a) > p.st.parryArc/2) continue;
         mo.owner = p.idx; mo.armed = true; mo.bounces = 0;
-        mo.vx = p.fx * M_SPEED_PARRY; mo.vy = p.fy * M_SPEED_PARRY;
-        mo.x = p.x + p.fx * (P_RADIUS + M_RADIUS + 3);
-        mo.y = p.y + p.fy * (P_RADIUS + M_RADIUS + 3);
+        mo.miss = [false,false];
+        mo.vx = p.fx * p.st.returnSpeed; mo.vy = p.fy * p.st.returnSpeed;
+        mo.x = p.x + p.fx * (p.st.radius + mo.radius + 3);
+        mo.y = p.y + p.fy * (p.st.radius + mo.radius + 3);
         mo.trail.length = 0;
-        p.flash = 0.22; p.parryT = 0; this.shake = Math.max(this.shake, 0.35);
-        this.burst(mo.x, mo.y, KEEPERS[p.idx].color, 16);
+        p.flash = 0.22; p.parryT = 0; p.addCharge(CHG_PARRY);
+        this.shake = Math.max(this.shake, 0.35);
+        this.burst(mo.x, mo.y, p.char.color, 16);
         break;
       }
     }
@@ -468,8 +636,23 @@ class Game {
     mo.armed = true;                 // after one wall, it belongs to nobody
     mo.bounces++;
     mo.trail.length = 0;
+    if (mo.gain !== 1){ mo.vx *= mo.gain; mo.vy *= mo.gain; }
     this.burst(mo.x, mo.y, "#cfe6ff", 4);
-    if (mo.bounces > M_MAX_BOUNCE) this.fizzle(mo);
+
+    if (mo.given < 3){ mo.given++; this.players[mo.owner].addCharge(CHG_BOUNCE); }
+
+    if (mo.split && mo.bounces === 1){          // Meran's prism opens here
+      mo.split = false;
+      const sp = len(mo.vx, mo.vy), a = Math.atan2(mo.vy, mo.vx);
+      for (const off of [-0.38, 0.38]){
+        const clone = new Mote(this.players[mo.owner], mo.x, mo.y,
+                               Math.cos(a+off)*sp, Math.sin(a+off)*sp);
+        clone.armed = true; clone.bounces = 1;
+        this.motes.push(clone);
+      }
+      this.burst(mo.x, mo.y, this.players[mo.owner].char.color, 14);
+    }
+    if (mo.bounces > mo.maxBounces) this.fizzle(mo);
   }
 
   fizzle(mo){
@@ -480,7 +663,7 @@ class Game {
   kill(mo){
     if (mo.dead) return;
     mo.dead = true;
-    this.players[mo.owner].reloads.push(RELOAD_TIME);
+    this.players[mo.owner].reloads.push(this.players[mo.owner].st.reload);
   }
 
   checkDeaths(){
@@ -491,11 +674,16 @@ class Game {
       if (!p.alive) continue;
       const b = this.bounds();
       if (p.x < b.x || p.x > b.x+b.w || p.y < b.y || p.y > b.y+b.h) dead[p.idx] = true;
+
       for (const mo of this.motes){
         if (mo.dead) continue;
-        if (!mo.armed && mo.owner === p.idx) continue;   // your own shot is inert until it arms
-        if (len(mo.x-p.x, mo.y-p.y) <= P_RADIUS + M_RADIUS){
+        const d = len(mo.x-p.x, mo.y-p.y);
+        if (!mo.armed && mo.owner === p.idx) continue;  // your own shot is inert until it arms
+        if (d <= p.st.radius + mo.radius){
+          if (p.ghost > 0) continue;                    // Silt is letting it through
           dead[p.idx] = true; mo.dead = true;
+        } else if (mo.armed && !mo.miss[p.idx] && d <= p.st.radius + mo.radius + 18){
+          mo.miss[p.idx] = true; p.addCharge(CHG_MISS); // read it, earn it
         }
       }
     }
@@ -503,7 +691,7 @@ class Game {
 
     for (let i=0;i<2;i++) if (dead[i]){
       this.players[i].alive = false;
-      this.burst(this.players[i].x, this.players[i].y, KEEPERS[i].color, 46, 260);
+      this.burst(this.players[i].x, this.players[i].y, this.players[i].char.color, 46, 260);
     }
     this.shake = 1;
     const winner = dead[0] && dead[1] ? -1 : (dead[0] ? 1 : 0);
@@ -531,36 +719,49 @@ class Game {
   /* ---------- network snapshot (host -> guest) ---------- */
   snapshot(){
     return {
-      r:this.round, t:this.time, e:this.encroach, sc:this.scores,
+      r:this.round, t:this.time, e:this.encroach, sc:this.scores, pk:this.picks,
       res:this.result ? this.result.winner : null,
       p:this.players.map(p => [
         Math.round(p.x*10)/10, Math.round(p.y*10)/10,
         Math.round(p.fx*100)/100, Math.round(p.fy*100)/100,
         p.alive?1:0, p.ammo,
         Math.round(p.parryT*100)/100, Math.round(p.dashCd*100)/100,
-        Math.round(p.parryCd*100)/100, Math.round(p.flash*100)/100 ]),
+        Math.round(p.parryCd*100)/100, Math.round(p.flash*100)/100,
+        Math.round(p.charge), Math.round(p.ghost*100)/100,
+        p.primed?1:0, Math.round(p.burstT*100)/100 ]),
       m:this.motes.map(m => [
         Math.round(m.x*10)/10, Math.round(m.y*10)/10,
-        Math.round(m.vx), Math.round(m.vy), m.owner, m.armed?1:0 ]),
+        Math.round(m.vx), Math.round(m.vy), m.owner, m.armed?1:0, m.radius ]),
+      w:this.temps.map(t => [t.x, t.y, t.w, t.h, t.void?1:0, Math.round(t.ttl*10)/10]),
+      g:this.rings.map(r => [r.x, r.y, Math.round(r.t*100)/100, r.life]),
       sh:Math.round(this.shake*100)/100,
     };
   }
 
   applySnapshot(s){
+    if (s.pk && (s.pk[0] !== this.players[0].charId || s.pk[1] !== this.players[1].charId)){
+      this.setPicks(s.pk);
+      this.players.forEach(p => { p.char = CHARS[p.charId]; p.st = p.char.st; });
+    }
     if (s.r !== this.round) this.loadRound(s.r);
     this.time = s.t; this.encroach = s.e; this.scores = s.sc;
     this.shake = s.sh;
     this.result = s.res === null ? null : { winner:s.res };
+
     s.p.forEach((a,i) => {
       const p = this.players[i];
       p.x=a[0]; p.y=a[1]; p.fx=a[2]; p.fy=a[3]; p.alive=!!a[4];
       p.ammo=a[5]; p.parryT=a[6]; p.dashCd=a[7]; p.parryCd=a[8]; p.flash=a[9];
+      p.charge=a[10]; p.ghost=a[11]; p.primed=!!a[12]; p.burstT=a[13];
     });
+    this.temps = s.w.map(t => ({x:t[0], y:t[1], w:t[2], h:t[3], void:!!t[4], ttl:t[5]}));
+    this.rings = s.g.map(r => ({x:r[0], y:r[1], t:r[2], life:r[3]}));
+
     // Rebuild motes, keeping trails for ones that persisted.
     const old = this.motes;
     this.motes = s.m.map((a,i) => {
-      const mo = new Mote(a[4], a[0], a[1], a[2], a[3]);
-      mo.armed = !!a[5];
+      const mo = new Mote(this.players[a[4]], a[0], a[1], a[2], a[3]);
+      mo.armed = !!a[5]; mo.radius = a[6];
       if (old[i]) mo.trail = old[i].trail;
       mo.trail.push(mo.x, mo.y);
       if (mo.trail.length > 16) mo.trail.splice(0, mo.trail.length - 16);
@@ -578,12 +779,60 @@ function drawRect(r, fill, top){
   if (top){ ctx.fillStyle = top; ctx.fillRect(r.x, r.y, r.w, 2); }
 }
 
+function wrapText(text, x, y, maxW, lineH, maxLines){
+  const words = text.split(" ");
+  let line = "", lines = 0;
+  for (const word of words){
+    const test = line ? line + " " + word : word;
+    if (ctx.measureText(test).width > maxW && line){
+      const lastAllowed = lines === maxLines-1;
+      ctx.fillText(lastAllowed ? line + "…" : line, x, y + lines*lineH);
+      if (++lines >= maxLines) return lines;
+      line = word;
+    } else line = test;
+  }
+  if (line){ ctx.fillText(line, x, y + lines*lineH); lines++; }
+  return lines;
+}
+
+// Auger's dowsing line: where the shot actually goes, two walls ahead.
+function predictPath(g, p, maxBounces){
+  const pts = [];
+  let x = p.x + p.fx*(p.st.radius+2), y = p.y + p.fy*(p.st.radius+2);
+  let dx = p.fx, dy = p.fy, bounces = 0, travelled = 0;
+  const STEP = 5, r = p.st.moteRadius;
+  pts.push(x, y);
+  while (bounces <= maxBounces && travelled < 1100){
+    x += dx*STEP; y += dy*STEP; travelled += STEP;
+    const b = g.bounds();
+    let hit = null;
+    if (x < b.x + r || x > b.x + b.w - r) hit = "x";
+    else if (y < b.y + r || y > b.y + b.h - r) hit = "y";
+    if (!hit){
+      for (const w of g.obstacles){
+        const probe = {x, y};
+        const axis = resolveCircleRect(probe, w, r);
+        if (axis){ if (w.void) { pts.push(x,y); return pts; } x = probe.x; y = probe.y; hit = axis; break; }
+      }
+    } else {
+      x = clamp(x, b.x + r, b.x + b.w - r);
+      y = clamp(y, b.y + r, b.y + b.h - r);
+    }
+    if (hit){
+      pts.push(x, y);
+      if (++bounces > maxBounces) break;
+      if (hit === "x") dx = -dx; else dy = -dy;
+    }
+  }
+  pts.push(x, y);
+  return pts;
+}
+
 function render(g, ui){
   ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
   ctx.clearRect(0,0,W,H);
   ctx.save();
 
-  // ground
   const grd = ctx.createRadialGradient(W/2, H/2, 40, W/2, H/2, W*0.75);
   grd.addColorStop(0, "#132132"); grd.addColorStop(1, "#070b12");
   ctx.fillStyle = grd; ctx.fillRect(0,0,W,H);
@@ -600,7 +849,7 @@ function render(g, ui){
   for (let y=0;y<=H;y+=48){ ctx.moveTo(0,y+.5); ctx.lineTo(W,y+.5); }
   ctx.stroke();
 
-  // walls
+  // arena walls
   for (const w of g.walls){
     if (w.void){
       drawRect(w, "#03050a");
@@ -611,6 +860,35 @@ function render(g, ui){
       ctx.strokeStyle = "rgba(150,190,230,.22)"; ctx.lineWidth = 1;
       ctx.strokeRect(w.x+.5, w.y+.5, w.w-1, w.h-1);
     }
+  }
+
+  // conjured walls: they fade as their time runs out
+  for (const t of g.temps){
+    const col = g.players[t.owner] ? g.players[t.owner].char.color : "#9fb6cc";
+    const a = clamp(t.ttl/1.2, 0.25, 1);
+    ctx.globalAlpha = a;
+    if (t.void){
+      drawRect(t, "#02040a");
+      ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.setLineDash([6,6]);
+      ctx.strokeRect(t.x+1, t.y+1, t.w-2, t.h-2); ctx.setLineDash([]);
+      ctx.globalAlpha = a*0.5;
+      ctx.beginPath(); ctx.arc(t.x+t.w/2, t.y+t.h/2, t.w*0.22, 0, 7);
+      ctx.strokeStyle = col; ctx.stroke();
+    } else {
+      drawRect(t, "#3a4a5e", col);
+      ctx.strokeStyle = col; ctx.lineWidth = 2;
+      ctx.strokeRect(t.x+1, t.y+1, t.w-2, t.h-2);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Keel's ring
+  for (const ring of g.rings){
+    const k = ring.t / ring.life;
+    ctx.globalAlpha = (1-k) * 0.85;
+    ctx.strokeStyle = "#e8f4ff"; ctx.lineWidth = 3 + 4*(1-k);
+    ctx.beginPath(); ctx.arc(ring.x, ring.y, 210*k, 0, 7); ctx.stroke();
+    ctx.globalAlpha = 1;
   }
 
   // the closing dark
@@ -626,10 +904,20 @@ function render(g, ui){
   ctx.strokeStyle = "rgba(150,190,230,.18)"; ctx.lineWidth = 2;
   ctx.strokeRect(1, 1, W-2, H-2);
 
+  // Auger's dowsing line
+  for (const p of g.players){
+    if (!p.alive || p.char.id !== "auger") continue;
+    const pts = predictPath(g, p, 2);
+    ctx.globalAlpha = .32; ctx.strokeStyle = p.char.color;
+    ctx.lineWidth = 1.5; ctx.setLineDash([7,9]);
+    ctx.beginPath(); ctx.moveTo(pts[0], pts[1]);
+    for (let i=2;i<pts.length;i+=2) ctx.lineTo(pts[i], pts[i+1]);
+    ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+  }
+
   // sparks
   for (const s of g.sparks){
-    const a = 1 - s.t/s.life;
-    ctx.globalAlpha = a; ctx.fillStyle = s.color;
+    ctx.globalAlpha = 1 - s.t/s.life; ctx.fillStyle = s.color;
     ctx.fillRect(s.x-1.5, s.y-1.5, 3, 3);
   }
   ctx.globalAlpha = 1;
@@ -637,56 +925,74 @@ function render(g, ui){
   // motes
   ctx.lineCap = "round";
   for (const m of g.motes){
-    const col = m.armed ? "#ffffff" : KEEPERS[m.owner].color;
+    const owner = g.players[m.owner].char.color;
     if (m.trail.length >= 4){
-      ctx.strokeStyle = KEEPERS[m.owner].color; ctx.globalAlpha = .28; ctx.lineWidth = 3;
+      ctx.strokeStyle = owner; ctx.globalAlpha = .28; ctx.lineWidth = m.radius*0.7;
       ctx.beginPath(); ctx.moveTo(m.trail[0], m.trail[1]);
       for (let i=2;i<m.trail.length;i+=2) ctx.lineTo(m.trail[i], m.trail[i+1]);
       ctx.lineTo(m.x, m.y); ctx.stroke(); ctx.globalAlpha = 1;
     }
     ctx.shadowBlur = m.armed ? 22 : 12;
-    ctx.shadowColor = KEEPERS[m.owner].color;
-    ctx.fillStyle = col;
-    ctx.beginPath(); ctx.arc(m.x, m.y, m.armed ? M_RADIUS : M_RADIUS-1, 0, 7); ctx.fill();
+    ctx.shadowColor = owner;
+    ctx.fillStyle = m.armed ? "#ffffff" : owner;
+    ctx.beginPath(); ctx.arc(m.x, m.y, m.armed ? m.radius : m.radius-1, 0, 7); ctx.fill();
     ctx.shadowBlur = 0;
     if (!m.armed){
       ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.arc(m.x, m.y, M_RADIUS+3, 0, 7); ctx.stroke();
+      ctx.beginPath(); ctx.arc(m.x, m.y, m.radius+3, 0, 7); ctx.stroke();
     }
   }
 
   // keepers
   for (const p of g.players){
-    const k = KEEPERS[p.idx];
     if (!p.alive) continue;
+    const col = p.char.color, rad = p.st.radius;
 
     if (p.parryT > 0 || p.flash > 0){
       const a = p.parryT > 0 ? 1 : p.flash/0.22;
       ctx.globalAlpha = 0.25 + 0.6*a;
       ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, PARRY_REACH, p.facing - PARRY_ARC/2, p.facing + PARRY_ARC/2);
+      ctx.arc(p.x, p.y, p.st.parryReach, p.facing - p.st.parryArc/2, p.facing + p.st.parryArc/2);
       ctx.stroke(); ctx.globalAlpha = 1;
     }
 
-    ctx.shadowBlur = 26; ctx.shadowColor = k.color;
-    ctx.fillStyle = k.color;
-    ctx.beginPath(); ctx.arc(p.x, p.y, P_RADIUS, 0, 7); ctx.fill();
-    ctx.shadowBlur = 0;
+    if (p.burstT > 0){                      // the moment a special goes off
+      const k = p.burstT/0.4;
+      ctx.globalAlpha = k*0.8; ctx.strokeStyle = col; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(p.x, p.y, rad + 34*(1-k), 0, 7); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
 
+    ctx.globalAlpha = p.ghost > 0 ? 0.32 : 1;    // Silt, mid-duck
+    ctx.shadowBlur = 26; ctx.shadowColor = col;
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(p.x, p.y, rad, 0, 7); ctx.fill();
+    ctx.shadowBlur = 0;
     ctx.fillStyle = "#05080d";
-    ctx.beginPath(); ctx.arc(p.x, p.y, P_RADIUS-5, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x, p.y, rad-5, 0, 7); ctx.fill();
 
     // the mirror: which way the shot and the guard will go
     ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3;
     ctx.beginPath();
-    ctx.moveTo(p.x + p.fx*(P_RADIUS-1), p.y + p.fy*(P_RADIUS-1));
-    ctx.lineTo(p.x + p.fx*(P_RADIUS+9), p.y + p.fy*(P_RADIUS+9));
+    ctx.moveTo(p.x + p.fx*(rad-1), p.y + p.fy*(rad-1));
+    ctx.lineTo(p.x + p.fx*(rad+9), p.y + p.fy*(rad+9));
     ctx.stroke();
+    ctx.globalAlpha = 1;
 
-    if (p.dashCd > DASH_COOLDOWN - DASH_TIME - 0.1){
-      ctx.globalAlpha = .35; ctx.strokeStyle = k.color; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(p.x, p.y, P_RADIUS+6, 0, 7); ctx.stroke(); ctx.globalAlpha = 1;
+    if (p.primed){                          // Meran's prism is loaded
+      ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(p.x, p.y, rad+5, 0, 7); ctx.stroke();
+    }
+    if (p.ready){                           // special is charged
+      ctx.globalAlpha = 0.55 + 0.45*Math.sin(g.time*7);
+      ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(p.x, p.y, rad+9, 0, 7); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    if (p.dashCd > p.st.dashCd - p.st.dashTime - 0.1){
+      ctx.globalAlpha = .35; ctx.strokeStyle = col; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(p.x, p.y, rad+6, 0, 7); ctx.stroke(); ctx.globalAlpha = 1;
     }
   }
 
@@ -704,31 +1010,38 @@ function drawHUD(g, ui){
   ctx.textBaseline = "top";
 
   for (let i=0;i<2;i++){
-    const p = g.players[i], k = KEEPERS[i];
-    const rightSide = i === 1;
-    const x = rightSide ? W-24 : 24;
-    ctx.textAlign = rightSide ? "right" : "left";
+    const p = g.players[i], col = p.char.color;
+    const right = i === 1, x = right ? W-24 : 24;
+    ctx.textAlign = right ? "right" : "left";
 
-    ctx.fillStyle = k.color;
-    ctx.fillText(k.name, x, 16);
+    ctx.fillStyle = col;
+    ctx.fillText(p.char.name, x, 14);
+    ctx.fillStyle = "rgba(200,215,235,.38)";
+    ctx.font = "500 10px ui-monospace,SFMono-Regular,Menlo,monospace";
+    ctx.fillText(p.char.title.toUpperCase(), x, 29);
+    ctx.font = "600 12px ui-monospace,SFMono-Regular,Menlo,monospace";
 
-    // score pips
-    for (let s=0;s<WINS_NEEDED;s++){
-      const px = rightSide ? x - 8 - s*16 : x + 4 + s*16;
-      ctx.beginPath(); ctx.arc(px, 42, 5, 0, 7);
-      if (s < g.scores[i]){ ctx.fillStyle = k.color; ctx.fill(); }
+    for (let s=0;s<WINS_NEEDED;s++){          // rounds won
+      const px = right ? x - 8 - s*16 : x + 4 + s*16;
+      ctx.beginPath(); ctx.arc(px, 50, 5, 0, 7);
+      if (s < g.scores[i]){ ctx.fillStyle = col; ctx.fill(); }
       else { ctx.strokeStyle = "rgba(255,255,255,.25)"; ctx.lineWidth = 1; ctx.stroke(); }
     }
-    // ammo pips
-    for (let a=0;a<AMMO;a++){
-      const px = rightSide ? x - 6 - a*12 : x + 6 + a*12;
-      ctx.beginPath(); ctx.arc(px, 62, 3.2, 0, 7);
+    for (let a=0;a<p.st.ammo;a++){            // motes in hand
+      const px = right ? x - 6 - a*12 : x + 6 + a*12;
+      ctx.beginPath(); ctx.arc(px, 68, 3.2, 0, 7);
       if (a < p.ammo){ ctx.fillStyle = "#e9f2ff"; ctx.fill(); }
       else { ctx.strokeStyle = "rgba(255,255,255,.22)"; ctx.stroke(); }
     }
-    const bx = rightSide ? x - 84 : x;
-    bar(bx, 76, 84, 3, 1 - p.parryCd/PARRY_COOLDOWN, "rgba(255,255,255,.65)");
-    bar(bx, 83, 84, 3, 1 - p.dashCd/DASH_COOLDOWN,  k.color);
+    const bx = right ? x - 92 : x;
+    bar(bx, 80, 92, 3, 1 - p.parryCd/p.st.parryCd, "rgba(255,255,255,.65)");
+    bar(bx, 87, 92, 3, 1 - p.dashCd/p.st.dashCd,  col);
+    bar(bx, 96, 92, 5, p.charge/CHG_FULL, p.ready ? "#ffffff" : "rgba(255,255,255,.45)");
+
+    ctx.font = "600 9px ui-monospace,SFMono-Regular,Menlo,monospace";
+    ctx.fillStyle = p.ready ? "#ffffff" : "rgba(200,215,235,.35)";
+    ctx.fillText(p.ready ? p.char.special + " READY" : p.char.special, right ? x : x, 106);
+    ctx.font = "600 12px ui-monospace,SFMono-Regular,Menlo,monospace";
   }
 
   ctx.textAlign = "center";
@@ -745,11 +1058,102 @@ function drawHUD(g, ui){
   }
 
   if (ui.netLabel){
-    ctx.textAlign = "center";
     ctx.fillStyle = "rgba(160,180,205,.5)";
     ctx.fillText(ui.netLabel, W/2, H-24);
   }
 }
+
+/* ============================================================
+   CHARACTER SELECT  (drawn on the canvas so host and guest
+   can share one screen over the wire)
+   ============================================================ */
+const SEL_COLS = 4, CARD_W = 204, CARD_H = 152, CARD_GAP = 16;
+const SEL_X = (W - (SEL_COLS*CARD_W + (SEL_COLS-1)*CARD_GAP)) / 2;
+const SEL_Y = 132;
+
+function cardRect(i){
+  const c = i % SEL_COLS, r = Math.floor(i / SEL_COLS);
+  return { x: SEL_X + c*(CARD_W+CARD_GAP), y: SEL_Y + r*(CARD_H+CARD_GAP), w:CARD_W, h:CARD_H };
+}
+
+function renderSelect(sel, ui){
+  ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
+  ctx.clearRect(0,0,W,H);
+  const grd = ctx.createRadialGradient(W/2, H/2, 40, W/2, H/2, W*0.8);
+  grd.addColorStop(0, "#101c2b"); grd.addColorStop(1, "#05080e");
+  ctx.fillStyle = grd; ctx.fillRect(0,0,W,H);
+
+  ctx.textBaseline = "top"; ctx.textAlign = "center";
+  ctx.font = "600 11px ui-monospace,SFMono-Regular,Menlo,monospace";
+  ctx.fillStyle = "rgba(200,215,235,.45)";
+  ctx.fillText("T H E   K E E P E R S   O F   T H E   C O A S T", W/2, 44);
+  ctx.font = "500 13px ui-monospace,SFMono-Regular,Menlo,monospace";
+  ctx.fillStyle = "rgba(200,215,235,.75)";
+  ctx.fillText("Take a mirror.  Fire locks it in, guard takes it back.", W/2, 72);
+
+  for (let i=0;i<CHARS.length;i++){
+    const c = CHARS[i], r = cardRect(i);
+    const chosenBy = [0,1].filter(s => sel.cursor[s] === i);
+    const lockedBy = chosenBy.filter(s => sel.locked[s]);
+
+    ctx.fillStyle = lockedBy.length ? "rgba(24,38,54,.95)" : "rgba(16,26,38,.9)";
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.strokeStyle = "rgba(120,155,195,.22)"; ctx.lineWidth = 1;
+    ctx.strokeRect(r.x+.5, r.y+.5, r.w-1, r.h-1);
+
+    // the keeper's own light
+    ctx.shadowBlur = 18; ctx.shadowColor = c.color;
+    ctx.fillStyle = c.color;
+    ctx.beginPath(); ctx.arc(r.x+28, r.y+30, 11, 0, 7); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "rgba(16,26,38,1)";
+    ctx.beginPath(); ctx.arc(r.x+28, r.y+30, 6, 0, 7); ctx.fill();
+
+    ctx.textAlign = "left";
+    ctx.font = "600 15px ui-monospace,SFMono-Regular,Menlo,monospace";
+    ctx.fillStyle = c.color;
+    ctx.fillText(c.name, r.x+50, r.y+18);
+    ctx.font = "500 10px ui-monospace,SFMono-Regular,Menlo,monospace";
+    ctx.fillStyle = "rgba(200,215,235,.5)";
+    ctx.fillText(c.title.toUpperCase(), r.x+50, r.y+36);
+
+    ctx.font = "500 10.5px ui-monospace,SFMono-Regular,Menlo,monospace";
+    ctx.fillStyle = "rgba(205,220,238,.78)";
+    wrapText(c.passive, r.x+14, r.y+58, r.w-28, 13, 3);
+
+    ctx.fillStyle = c.color;
+    ctx.font = "600 10px ui-monospace,SFMono-Regular,Menlo,monospace";
+    ctx.fillText("◆ " + c.special, r.x+14, r.y+104);
+    ctx.fillStyle = "rgba(200,215,235,.58)";
+    ctx.font = "500 10px ui-monospace,SFMono-Regular,Menlo,monospace";
+    wrapText(c.specialText, r.x+14, r.y+120, r.w-28, 12, 2);
+
+    // seat cursors sit just outside the card, one inset per seat
+    chosenBy.forEach(s => {
+      const p = g_picksColor(s), inset = s === 0 ? 0 : 4;
+      ctx.strokeStyle = p; ctx.lineWidth = 2;
+      ctx.globalAlpha = sel.locked[s] ? 1 : 0.55 + 0.45*Math.sin(Date.now()/160);
+      ctx.strokeRect(r.x-3+inset, r.y-3+inset, r.w+6-2*inset, r.h+6-2*inset);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = p;
+      ctx.font = "600 9px ui-monospace,SFMono-Regular,Menlo,monospace";
+      ctx.textAlign = s === 0 ? "left" : "right";
+      ctx.fillText(sel.locked[s] ? (s===0?"P1 LOCKED":"P2 LOCKED") : (s===0?"P1":"P2"),
+                   s === 0 ? r.x : r.x + r.w, r.y + r.h + 8);
+    });
+  }
+
+  ctx.textAlign = "center";
+  ctx.font = "500 11px ui-monospace,SFMono-Regular,Menlo,monospace";
+  ctx.fillStyle = "rgba(200,215,235,.45)";
+  ctx.fillText(ui.selHint || "", W/2, H-42);
+  ctx.fillStyle = "rgba(200,215,235,.3)";
+  ctx.fillText("ESC  —  back to the menu", W/2, H-24);
+}
+
+// Seat colours on the select screen: the seat's own pick.
+let SELECT_STATE = { cursor:[0,1], locked:[false,false], lastAx:[0,0], lastAy:[0,0] };
+function g_picksColor(seat){ return CHARS[SELECT_STATE.cursor[seat]].color; }
 
 /* ============================================================
    OVERLAY CARDS
@@ -757,64 +1161,70 @@ function drawHUD(g, ui){
 function show(html){ overlay.innerHTML = `<div class="card">${html}</div>`; overlay.classList.add("on"); }
 function hide(){ overlay.classList.remove("on"); overlay.innerHTML = ""; }
 
-const CONTROLS_HTML = (both) => `
-  <div class="keys">
-    <section>
-      <h3 class="ines">${both ? "Ines — left side" : "You"}</h3>
-      <dl><dt>W A S D</dt><dd>move &amp; aim</dd>
-          <dt>Space</dt><dd>fire</dd>
-          <dt>Q</dt><dd>guard / parry</dd>
-          <dt>E</dt><dd>dash</dd></dl>
-    </section>
-    ${both ? `<section>
-      <h3 class="cato">Cato — right side</h3>
-      <dl><dt>&uarr; &darr; &larr; &rarr;</dt><dd>move &amp; aim</dd>
-          <dt>. period</dt><dd>fire</dd>
-          <dt>, comma</dt><dd>guard / parry</dd>
-          <dt>/ slash</dt><dd>dash</dd></dl>
-    </section>` : `<section>
-      <h3>Rules</h3>
-      <dl><dt>Aim</dt><dd>is your movement direction</dd>
-          <dt>Motes</dt><dd>arm after one bounce — then they kill you too</dd>
-          <dt>Parry</dt><dd>sends a mote wherever you face</dd></dl>
-    </section>`}
-  </div>`;
-
 function menuCard(){
   show(`
     <div class="kicker">A duel for one lamp</div>
     <h1>SALT&nbsp;LINE</h1>
     <p>The sea took the coast in a single winter. What is left is a tower, a lamp,
-       and two sisters who each know how to keep it.</p>
-    <p>Mirrors at dusk. First to ${WINS_NEEDED} rounds keeps the light.</p>
+       and two keepers who both know how to keep it.</p>
+    <p>Mirrors at dusk. First to ${WINS_NEEDED} rounds keeps the light.
+       ${CHARS.length} keepers to choose from, each with their own craft and one earned special.</p>
     <div class="rule"></div>
     <p class="hint"><b>1</b> — two players, one keyboard &nbsp;·&nbsp;
        <b>2</b> — host an online duel &nbsp;·&nbsp;
        <b>3</b> — join with a code</p>
-    ${CONTROLS_HTML(true)}
+    <div class="keys">
+      <section>
+        <h3>Player one — left side</h3>
+        <dl><dt>W A S D</dt><dd>move &amp; aim</dd>
+            <dt>Space</dt><dd>fire</dd>
+            <dt>Q</dt><dd>guard / parry</dd>
+            <dt>E</dt><dd>dash</dd>
+            <dt>F</dt><dd>special</dd></dl>
+      </section>
+      <section>
+        <h3>Player two — right side</h3>
+        <dl><dt>&uarr; &darr; &larr; &rarr;</dt><dd>move &amp; aim</dd>
+            <dt>. period</dt><dd>fire</dd>
+            <dt>, comma</dt><dd>guard / parry</dd>
+            <dt>/ slash</dt><dd>dash</dd>
+            <dt>; semicolon</dt><dd>special</dd></dl>
+      </section>
+    </div>
     <p class="hint" style="margin-top:22px">Every mote you fire arms after its first wall.
-       After that it does not care whose it was.</p>
+       After that it does not care whose it was. Charge your special by parrying,
+       by keeping your motes alive off the walls, and by slipping past a live one.</p>
   `);
 }
 
-function beatCard(i, resultLine){
-  const b = BEATS[i % BEATS.length], k = KEEPERS[b.who];
+function beatCard(i, resultLine, names){
+  const b = BEATS[i % BEATS.length];
+  const who = names[b.who];
   show(`
-    ${resultLine ? `<div class="kicker">${resultLine}</div>` : `<div class="kicker">Salt Line — round ${i+1}</div>`}
-    <h2 class="${k.cls}">${b.head}</h2>
-    <p class="speaker">From the log of ${k.name}</p>
+    ${resultLine ? `<div class="kicker">${resultLine}</div>`
+                 : `<div class="kicker">Salt Line — round ${i+1}</div>`}
+    <h2 style="color:${who.color}">${b.head}</h2>
+    <p class="speaker">From the log of ${who.name}, ${who.title.toLowerCase()}</p>
     ${b.lines.map(l => `<p>${l}</p>`).join("")}
     <div class="rule"></div>
     <p class="hint blink">Press <b>fire</b> to take your place — <kbd>Space</kbd>${netMode==="local"?` or <kbd>.</kbd>`:``}</p>
   `);
 }
 
-function epilogueCard(winner, scores){
-  const e = EPILOGUE[winner], k = KEEPERS[winner];
+function epilogueCard(winner, scores, names){
+  const w = names[winner], l = names[1-winner];
   show(`
-    <div class="kicker">${KEEPERS[0].name} ${scores[0]} — ${scores[1]} ${KEEPERS[1].name}</div>
-    <h2 class="${k.cls}">${e.head}</h2>
-    ${e.lines.map(l => `<p>${l}</p>`).join("")}
+    <div class="kicker">${names[0].name} ${scores[0]} — ${scores[1]} ${names[1].name}</div>
+    <h2 style="color:${w.color}">One light on the coast</h2>
+    <p>${w.name} climbs. The wick catches on the second match and holds.</p>
+    <p>Below the cistern something turns over in its sleep and settles, the way a thing
+       settles when it has decided it can wait.</p>
+    <p>${l.name} takes the salt line inland at low tide without once looking back — because
+       ${w.name} is watching, and a keeper who looks back is a keeper who comes back,
+       and the tower holds one.</p>
+    <p>In the years after, ${w.name} ${w.ending}</p>
+    <p>By morning there is a single light burning on eighty miles of drowned coast.
+       There was only ever supposed to be one.</p>
     <div class="rule"></div>
     <p class="hint blink">Press <b>fire</b> to begin again</p>
   `);
@@ -828,9 +1238,9 @@ function epilogueCard(winner, scores){
    ============================================================ */
 let netMode = "local";                 // "local" | "host" | "guest"
 let pc = null, ch = null, netNote = "";
-let localSeq  = { f:0, p:0, d:0, c:0 };      // guest: presses, as counters
-let remoteSeq = { f:0, p:0, d:0, c:0 };      // host: presses already applied
-let remotePkt = { a:[0,0], f:0, p:0, d:0, c:0 };
+let localSeq  = { f:0, p:0, d:0, s:0, c:0 };   // guest: presses, as counters
+let remoteSeq = { f:0, p:0, d:0, s:0, c:0 };   // host: presses already applied
+let remotePkt = { a:[0,0], f:0, p:0, d:0, s:0, c:0 };
 let lastUiKey = "";
 
 const enc = o => btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(o)))).replace(/=+$/,"");
@@ -863,9 +1273,9 @@ function wireChannel(){
   ch.binaryType = "arraybuffer";
   ch.onopen = () => {
     netNote = "";
-    if (netMode === "host") startMatch();
+    if (netMode === "host") startSelect();
     else show(`<div class="kicker">Connected</div><h2>Waiting for the host</h2>
-               <p>The duel begins as soon as they take their place.</p>`);
+               <p>Choosing keepers begins in a moment.</p>`);
   };
   ch.onclose = () => { netNote = "the other keeper disconnected"; toMenu(); };
   ch.onmessage = ev => {
@@ -898,7 +1308,7 @@ async function hostFlow(){
   if (netMode !== "host") return;
   const code = enc({ t:pc.localDescription.type, s:pc.localDescription.sdp });
 
-  netCardShell("Hosting — you are <span class='ines'>INES</span>", `
+  netCardShell("Hosting — you take the left seat", `
     <p><b>1.</b> Send this invitation code to the other keeper:</p>
     <textarea ${TA} id="mine" readonly>${code}</textarea>
     <button ${BTNS} id="copy">COPY CODE</button>
@@ -921,7 +1331,7 @@ async function hostFlow(){
 
 async function joinFlow(){
   netMode = "guest"; state = ST.NET;
-  netCardShell("Joining — you are <span class='cato'>CATO</span>", `
+  netCardShell("Joining — you take the right seat", `
     <p><b>1.</b> Paste the host's invitation code:</p>
     <textarea ${TA} id="theirs" placeholder="their invitation code"></textarea>
     <button ${BTNS} id="go">GENERATE REPLY</button>`, "");
@@ -939,7 +1349,7 @@ async function joinFlow(){
     await iceComplete(pc);
     if (netMode !== "guest") return;
     const code = enc({ t:pc.localDescription.type, s:pc.localDescription.sdp });
-    netCardShell("Joining — you are <span class='cato'>CATO</span>", `
+    netCardShell("Joining — you take the right seat", `
       <p><b>2.</b> Send this reply code back to the host, then wait:</p>
       <textarea ${TA} id="mine" readonly>${code}</textarea>
       <button ${BTNS} id="copy">COPY REPLY</button>`, "waiting for the host to connect");
@@ -954,20 +1364,26 @@ function netTeardown(){
   try { ch && ch.close(); } catch {}
   try { pc && pc.close(); } catch {}
   ch = null; pc = null; netMode = "local";
-  localSeq = {f:0,p:0,d:0,c:0}; remoteSeq = {f:0,p:0,d:0,c:0};
-  remotePkt = { a:[0,0], f:0, p:0, d:0, c:0 };
+  localSeq = {f:0,p:0,d:0,s:0,c:0}; remoteSeq = {f:0,p:0,d:0,s:0,c:0};
+  remotePkt = { a:[0,0], f:0, p:0, d:0, s:0, c:0 };
 }
 
 function send(o){ if (ch && ch.readyState === "open") { try { ch.send(JSON.stringify(o)); } catch {} } }
 
-/* host: turn the guest's packet into one frame of input */
+/* host: turn the guest's packet into one frame of input.
+   Presses arrive as counters, so a dropped packet never eats a shot. */
 function remoteInput(){
   const i = blankInput();
   i.ax = remotePkt.a[0]; i.ay = remotePkt.a[1];
-  for (const k of ["f","p","d","c"]){
-    if (remotePkt[k] > remoteSeq[k]){ remoteSeq[k]++; 
-      if (k==="f") i.fire = true; else if (k==="p") i.parry = true;
-      else if (k==="d") i.dash = true; else i.confirm = true; }
+  for (const k of ["f","p","d","s","c"]){
+    if (remotePkt[k] > remoteSeq[k]){
+      remoteSeq[k]++;
+      if (k==="f") i.fire = true;
+      else if (k==="p"){ i.parry = true; i.back = true; }
+      else if (k==="d") i.dash = true;
+      else if (k==="s") i.special = true;
+      else i.confirm = true;
+    }
   }
   return i;
 }
@@ -976,34 +1392,37 @@ function remoteInput(){
 function guestSend(){
   const s = SCHEMES[0];
   let ax = 0, ay = 0;
-  if (held.has(s.left)) ax -= 1; if (held.has(s.right)) ax += 1;
-  if (held.has(s.up))   ay -= 1; if (held.has(s.down))  ay += 1;
-  if (edge.has(s.fire))  localSeq.f++;
-  if (edge.has(s.parry)) localSeq.p++;
-  if (edge.has(s.dash))  localSeq.d++;
-  if (edge.has(s.fire) || edge.has("Enter")) localSeq.c++;
-  send({ i:{ a:[ax,ay], f:localSeq.f, p:localSeq.p, d:localSeq.d, c:localSeq.c } });
+  if (hasHeld(s.left)) ax -= 1; if (hasHeld(s.right)) ax += 1;
+  if (hasHeld(s.up))   ay -= 1; if (hasHeld(s.down))  ay += 1;
+  if (hasEdge(s.fire))    localSeq.f++;
+  if (hasEdge(s.parry))   localSeq.p++;
+  if (hasEdge(s.dash))    localSeq.d++;
+  if (hasEdge(s.special)) localSeq.s++;
+  if (hasEdge(s.fire) || edge.has("Enter")) localSeq.c++;
+  send({ i:{ a:[ax,ay], f:localSeq.f, p:localSeq.p, d:localSeq.d, s:localSeq.s, c:localSeq.c } });
 }
 
 function guestApply(s, u){
   const wasAlive = game.players.map(p => p.alive);
   const nMotes = game.motes.length;
   const last = game.motes[nMotes-1];
-  const lastPos = last ? {x:last.x, y:last.y, o:last.owner} : null;
+  const lastPos = last ? {x:last.x, y:last.y} : null;
 
   game.applySnapshot(s);
 
   if (game.motes.length < nMotes && lastPos) game.burst(lastPos.x, lastPos.y, "#cfe6ff", 8);
   for (let i=0;i<2;i++) if (wasAlive[i] && !game.players[i].alive)
-    game.burst(game.players[i].x, game.players[i].y, KEEPERS[i].color, 46, 260);
+    game.burst(game.players[i].x, game.players[i].y, game.players[i].char.color, 46, 260);
+
+  if (u.sel){ SELECT_STATE.cursor = u.sel.c; SELECT_STATE.locked = u.sel.l; }
 
   const key = JSON.stringify(u);
   if (key !== lastUiKey){
     lastUiKey = key;
     state = u.st;
-    if (u.st === ST.CARD) beatCard(u.i, u.r);
-    else if (u.st === ST.EPI) epilogueCard(u.w, game.scores);
-    else if (u.st === ST.PLAY) hide();
+    if (u.st === ST.CARD) beatCard(u.i, u.r, seatNames());
+    else if (u.st === ST.EPI) epilogueCard(u.w, game.scores, seatNames());
+    else if (u.st === ST.PLAY || u.st === ST.SELECT) hide();
     else if (u.st === ST.MENU) menuCard();
   }
 }
@@ -1011,13 +1430,16 @@ function guestApply(s, u){
 /* ============================================================
    STATE MACHINE
    ============================================================ */
-const ST = { MENU:0, NET:1, CARD:2, PLAY:3, EPI:4 };
+const ST = { MENU:0, NET:1, SELECT:2, CARD:3, PLAY:4, EPI:5 };
 let state = ST.MENU;
 let game = new Game();
 let cardIdx = 0, resultLine = "", epiWinner = 0;
 
+function seatNames(){ return game.players.map(p => p.char); }
+
 function uiPacket(){
-  return { st:state, i:cardIdx, r:resultLine, w:epiWinner };
+  return { st:state, i:cardIdx, r:resultLine, w:epiWinner,
+           sel:{ c:SELECT_STATE.cursor, l:SELECT_STATE.locked } };
 }
 
 function toMenu(){
@@ -1028,11 +1450,43 @@ function toMenu(){
   if (netNote){ const el = document.querySelector(".kicker"); if (el) el.textContent = netNote; netNote = ""; }
 }
 
-function startMatch(){
-  game = new Game();
+function startSelect(){
+  SELECT_STATE = { cursor:[0,1], locked:[false,false], lastAx:[0,0], lastAy:[0,0] };
+  state = ST.SELECT;
+  hide();
+}
+
+function stepSelect(inputs){
+  for (let s=0;s<2;s++){
+    const inp = inputs[s];
+    if (SELECT_STATE.locked[s]){
+      if (inp.back) SELECT_STATE.locked[s] = false;     // guard takes your pick back
+      continue;
+    }
+    // move one card per press, not one per frame
+    const ax = Math.sign(inp.ax), ay = Math.sign(inp.ay);
+    let i = SELECT_STATE.cursor[s];
+    if (ax !== 0 && ax !== SELECT_STATE.lastAx[s]){
+      const col = i % SEL_COLS, row = Math.floor(i / SEL_COLS);
+      i = row*SEL_COLS + (col + ax + SEL_COLS) % SEL_COLS;
+    }
+    if (ay !== 0 && ay !== SELECT_STATE.lastAy[s]){
+      const rows = Math.ceil(CHARS.length / SEL_COLS);
+      const col = i % SEL_COLS, row = Math.floor(i / SEL_COLS);
+      i = ((row + ay + rows) % rows)*SEL_COLS + col;
+    }
+    SELECT_STATE.cursor[s] = clamp(i, 0, CHARS.length-1);
+    SELECT_STATE.lastAx[s] = ax; SELECT_STATE.lastAy[s] = ay;
+    if (inp.fire) SELECT_STATE.locked[s] = true;
+  }
+  if (SELECT_STATE.locked[0] && SELECT_STATE.locked[1]) beginStory();
+}
+
+function beginStory(){
+  game = new Game(SELECT_STATE.cursor.slice());
   cardIdx = 0; resultLine = "";
   state = ST.CARD;
-  beatCard(0, "");
+  beatCard(0, "", seatNames());
 }
 
 function beginRound(){
@@ -1050,14 +1504,15 @@ function endOfRound(){
   }
   if (game.scores[w] >= WINS_NEEDED){
     epiWinner = w; state = ST.EPI;
-    epilogueCard(w, game.scores);
+    epilogueCard(w, game.scores, seatNames());
     return;
   }
   cardIdx++;
-  resultLine = `${KEEPERS[w].name} takes the round, ${ROUND_FLAVOR[Math.min(cardIdx-1, ROUND_FLAVOR.length-1)]}` +
+  resultLine = `${game.players[w].char.name} takes the round, ` +
+               `${ROUND_FLAVOR[Math.min(cardIdx-1, ROUND_FLAVOR.length-1)]}` +
                ` — ${game.scores[0]}–${game.scores[1]}`;
   state = ST.CARD;
-  beatCard(cardIdx, resultLine);
+  beatCard(cardIdx, resultLine, seatNames());
 }
 
 /* ============================================================
@@ -1070,25 +1525,39 @@ function tick(now){
   requestAnimationFrame(tick);
   const dt = Math.min(0.1, (now - last)/1000); last = now;
 
-  if (edge.has("Escape") && (state !== ST.MENU)){ netNote = ""; toMenu(); edge.clear(); return; }
+  if (edge.has("Escape") && state !== ST.MENU){ netNote = ""; toMenu(); edge.clear(); return; }
 
   if (netMode === "guest"){
     guestSend();
     game.stepSparks(dt);
-    if (state === ST.PLAY) render(game, { netLabel:"ONLINE — you are CATO" });
+    if (state === ST.PLAY) render(game, { netLabel:"ONLINE — you hold the right seat" });
+    else if (state === ST.SELECT) renderSelect(SELECT_STATE, { selHint:"the host takes the left seat" });
     edge.clear();
     return;
   }
 
+  const seatInputs = () => netMode === "host"
+    ? [readInput(0), remoteInput()]
+    : [readInput(0), readInput(1)];
+
   switch (state){
     case ST.MENU:
-      if (edge.has("Digit1") || edge.has("Numpad1")){ netMode = "local"; startMatch(); }
+      if (edge.has("Digit1") || edge.has("Numpad1")){ netMode = "local"; startSelect(); }
       else if (edge.has("Digit2") || edge.has("Numpad2")) hostFlow();
       else if (edge.has("Digit3") || edge.has("Numpad3")) joinFlow();
       break;
 
     case ST.NET:
       break;
+
+    case ST.SELECT: {
+      stepSelect(seatInputs());
+      if (state === ST.SELECT)
+        renderSelect(SELECT_STATE, { selHint: netMode === "host"
+          ? "you hold the left seat — they choose for themselves"
+          : "player one on W A S D, player two on the arrows" });
+      break;
+    }
 
     case ST.CARD: {
       const go = netMode === "host" ? (anyConfirm() || remoteInput().confirm) : anyConfirm();
@@ -1097,29 +1566,24 @@ function tick(now){
     }
 
     case ST.PLAY: {
-      const inputs = netMode === "host"
-        ? [readInput(0), remoteInput()]
-        : [readInput(0), readInput(1)];
-
+      const inputs = seatInputs();
       acc += dt;
       let first = true;
       while (acc >= FIXED){
         game.step(FIXED, inputs);
         acc -= FIXED;
-        if (first){                       // presses fire once, not once per substep
-          for (const i of inputs){ i.fire = i.parry = i.dash = false; }
+        if (first){                       // a press fires once, not once per substep
+          for (const i of inputs){ i.fire = i.parry = i.dash = i.special = false; }
           first = false;
         }
       }
-      render(game, { netLabel: netMode === "host" ? "ONLINE — you are INES" : "" });
+      render(game, { netLabel: netMode === "host" ? "ONLINE — you hold the left seat" : "" });
       if (game.result && game.overTimer > 1.8) endOfRound();
       break;
     }
 
     case ST.EPI:
-      if (netMode === "host" ? (anyConfirm() || remoteInput().confirm) : anyConfirm()){
-        if (netMode === "host") startMatch(); else toMenu();
-      }
+      if (netMode === "host" ? (anyConfirm() || remoteInput().confirm) : anyConfirm()) startSelect();
       break;
   }
 
