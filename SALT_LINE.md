@@ -25,10 +25,13 @@ nothing that decides a round. Everything below is a decision:
 - **The guard is a counterattack.** A parry catches a mote only inside the arc in
   front of you and returns it along whatever direction you face, so you can bank
   the return instead of just handing it back. The window is roughly a fifth of a
-  second, and pressing early fails.
+  second, and pressing early fails. If both keepers could catch the same mote on
+  the same frame, the nearer mirror takes it and a dead heat goes to neither —
+  seat order never decides a duel.
 - **Ammo is finite and traceable.** A spent mote returns to you only after it
   fizzles, so a wild volley leaves you empty and readable.
-- **No stalling.** After 45 seconds the dark closes in a ring at a time.
+- **No stalling.** After 45 seconds the dark closes in a ring at a time, and it
+  does not stop closing. Whoever is worst placed is caught first.
 - **Symmetric arenas.** Every layout is identical under a 180° rotation, so
   neither side inherits an advantage from the geometry.
 
@@ -70,6 +73,37 @@ earns exactly nothing, and so does running and dashing. It fills only from:
 | Special | `F` | `;` |
 
 `Esc` returns to the menu. Online, both players use the left-hand set.
+
+## Playing alone
+
+Menu option `4`. The CPU is not given anything you are not:
+
+- it fills **the same input struct your keyboard fills** — eight directions, one
+  fire, one guard, one dash, one special;
+- it aims in **the same eight directions** a keyboard can produce, so it cannot
+  draw an angle you cannot;
+- it reads **only what is drawn on the screen** — no velocities you cannot see,
+  no knowledge of what you are about to press;
+- it is **deterministic**: the same position is answered the same way twice, so
+  it can be learned and then beaten, never merely out-rolled.
+
+Difficulty is a capability, not a handicap dial. Each level differs in reaction
+time, how many walls it will bank a shot off, how often it commits to a guard,
+and whether it fires without a solution:
+
+| | Reaction | Banks | Guards | Fires blind |
+|---|---|---|---|---|
+| **Apprentice** | 0.30s | direct shots only | rarely | often — and hits itself doing it |
+| **Keeper** | 0.17s | one wall | about half | occasionally |
+| **Warden** | 0.085s | two walls | almost always | never |
+
+Measured over 240 CPU-vs-CPU rounds per matchup, seat orders balanced: Warden
+takes 78% of decided rounds against Apprentice, 77% against Keeper, and Keeper
+takes 75% against Apprentice. Across 1,200 mirror rounds from varied but
+symmetric starts, neither seat is favoured (53.1%, inside the fair band).
+
+On the select screen the CPU waits for your pick, then answers it with a
+counter of its own.
 
 ## Online play
 

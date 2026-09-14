@@ -372,6 +372,10 @@ class Game {
 
   loadRound(i){
     this.round = i;
+    MOTE_SEQ = 0;          // ids restart each round: the CPU reads them, and its
+                           // answer to a position must not depend on how many
+                           // motes the page happened to spawn before this one
+
     this.arena = ARENAS[i % ARENAS.length];
     this.walls = this.arena.walls.map(w => ({...w}));
     this.temps = [];                 // walls conjured by specials
@@ -416,7 +420,9 @@ class Game {
         this.closeTimer += dt;
         if (this.closeTimer >= CLOSE_STEP){
           this.closeTimer -= CLOSE_STEP;
-          this.encroach = Math.min(this.encroach + CLOSE_AMOUNT, 200);
+          // No ceiling: the dark keeps stepping in until it catches whoever
+          // is worst placed. A round cannot be waited out.
+          this.encroach += CLOSE_AMOUNT;
         }
       }
       for (let i=0;i<2;i++) this.stepPlayer(this.players[i], inputs[i], dt);
@@ -610,6 +616,10 @@ class Game {
 
       // Parry: a live guard in front of a keeper catches the mote and
       // sends it back along whatever direction that keeper is facing.
+      // If both keepers could catch the same mote on the same frame the
+      // nearer mirror takes it; a dead heat goes to neither, so seat order
+      // never decides a duel.
+      let claim = null, tie = false;
       for (const p of this.players){
         if (!p.alive || p.parryT <= 0) continue;
         const dx = mo.x - p.x, dy = mo.y - p.y, d = len(dx,dy);
@@ -617,6 +627,11 @@ class Game {
         let a = Math.atan2(dy,dx) - p.facing;
         a = Math.atan2(Math.sin(a), Math.cos(a));
         if (Math.abs(a) > p.st.parryArc/2) continue;
+        if (!claim || d < claim.d - 1e-9){ claim = {p, d}; tie = false; }
+        else if (Math.abs(d - claim.d) <= 1e-9) tie = true;
+      }
+      if (claim && !tie){
+        const p = claim.p;
         mo.owner = p.idx; mo.armed = true; mo.bounces = 0;
         mo.miss = [false,false];
         mo.vx = p.fx * p.st.returnSpeed; mo.vy = p.fy * p.st.returnSpeed;
@@ -626,7 +641,6 @@ class Game {
         p.flash = 0.22; p.parryT = 0; p.addCharge(CHG_PARRY);
         this.shake = Math.max(this.shake, 0.35);
         this.burst(mo.x, mo.y, p.char.color, 16);
-        break;
       }
     }
     this.motes = this.motes.filter(m => !m.dead);
@@ -1016,9 +1030,9 @@ function drawHUD(g, ui){
 
     ctx.fillStyle = col;
     ctx.fillText(p.char.name, x, 14);
-    ctx.fillStyle = "rgba(200,215,235,.38)";
+    ctx.fillStyle = CPU.seats[i] ? "rgba(255,255,255,.5)" : "rgba(200,215,235,.38)";
     ctx.font = "500 10px ui-monospace,SFMono-Regular,Menlo,monospace";
-    ctx.fillText(p.char.title.toUpperCase(), x, 29);
+    ctx.fillText(CPU.seats[i] ? "CPU · " + CPU_LEVELS[CPU.level].id : p.char.title.toUpperCase(), x, 29);
     ctx.font = "600 12px ui-monospace,SFMono-Regular,Menlo,monospace";
 
     for (let s=0;s<WINS_NEEDED;s++){          // rounds won
@@ -1172,7 +1186,8 @@ function menuCard(){
     <div class="rule"></div>
     <p class="hint"><b>1</b> — two players, one keyboard &nbsp;·&nbsp;
        <b>2</b> — host an online duel &nbsp;·&nbsp;
-       <b>3</b> — join with a code</p>
+       <b>3</b> — join with a code &nbsp;·&nbsp;
+       <b>4</b> — alone, against the tower</p>
     <div class="keys">
       <section>
         <h3>Player one — left side</h3>
@@ -1194,6 +1209,22 @@ function menuCard(){
     <p class="hint" style="margin-top:22px">Every mote you fire arms after its first wall.
        After that it does not care whose it was. Charge your special by parrying,
        by keeping your motes alive off the walls, and by slipping past a live one.</p>
+  `);
+}
+
+function difficultyCard(){
+  show(`
+    <div class="kicker">Alone against the tower</div>
+    <h2>Who is holding the other mirror?</h2>
+    <p>It plays with the same keyboard you do — eight directions, one fire, one guard,
+       one dash, one special — and it reads only what is drawn on the screen.</p>
+    <p>It is also deterministic. The same position is answered the same way twice,
+       so it can be learned, and then beaten.</p>
+    <div class="rule"></div>
+    <p class="hint"><b>1</b> — Apprentice &nbsp;·&nbsp; slow to see it coming, rarely guards</p>
+    <p class="hint" style="margin-top:8px"><b>2</b> — Keeper &nbsp;·&nbsp; banks one wall, guards about half of what it should</p>
+    <p class="hint" style="margin-top:8px"><b>3</b> — Warden &nbsp;·&nbsp; banks two walls, guards almost everything, never hesitates</p>
+    <p class="hint" style="margin-top:22px">Press <kbd>Esc</kbd> to go back</p>
   `);
 }
 
@@ -1428,9 +1459,338 @@ function guestApply(s, u){
 }
 
 /* ============================================================
+   THE CPU
+   It plays through exactly the struct a human keyboard fills:
+   eight directions, one fire, one guard, one dash, one special.
+   Three rules keep it honest —
+     · it reads only what is drawn on the screen,
+     · it aims in the same eight directions a keyboard can make,
+     · it is deterministic, so the same position is answered the
+       same way twice and can be learned instead of out-rolled.
+   ============================================================ */
+const CPU_LEVELS = [
+  { id:"APPRENTICE", think:0.30, bounces:0, parryOdds:0.20, dashOdds:0.30,
+    specialOdds:0.35, lead:0.0,  hesitate:0.40, keepAt:270, blindFire:0.34 },
+  { id:"KEEPER",     think:0.17, bounces:1, parryOdds:0.60, dashOdds:0.70,
+    specialOdds:0.80, lead:0.55, hesitate:0.18, keepAt:285, blindFire:0.07 },
+  { id:"WARDEN",     think:0.085,bounces:2, parryOdds:0.93, dashOdds:0.95,
+    specialOdds:1.00, lead:1.0,  hesitate:0.0,  keepAt:260, blindFire:0.0 },
+];
+
+const CPU = { seats:[false,false], level:1, mem:[null,null], selT:0 };
+
+const DIRS8 = (() => {
+  const out = [];
+  for (let i=0;i<8;i++){ const a = i*Math.PI/4; out.push([Math.cos(a), Math.sin(a)]); }
+  return out;
+})();
+
+// Deterministic stand-in for a coin flip: the same situation always answers alike.
+function hash01(x, y){
+  let h = (Math.imul(x|0, 374761393) + Math.imul(y|0, 668265263)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177) | 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+// Decorrelates the two seats without favouring either: the draw comes from
+// this keeper's own position and the mote in front of it, never from which
+// seat it happens to be sitting in.
+function cpuDraw(p, a, b){
+  return hash01(Math.round(p.x)*13 + (a|0), Math.round(p.y)*7 + (b|0) + CPU.level*101);
+}
+
+function cpuMem(){
+  return { t:0, round:-1, dir:[0,0], fire:false, dash:false, special:false, parryTarget:0 };
+}
+
+function cpuBlocked(g, x, y, r){
+  const b = g.bounds();
+  if (x < b.x+r || x > b.x+b.w-r || y < b.y+r || y > b.y+b.h-r) return true;
+  for (const w of g.obstacles){ if (resolveCircleRect({x,y}, w, r)) return true; }
+  return false;
+}
+
+function cpuClearLine(g, from, to){
+  const dx = to.x-from.x, dy = to.y-from.y, d = len(dx,dy) || 1;
+  const stepX = dx/d*12, stepY = dy/d*12;
+  let x = from.x, y = from.y;
+  for (let i=0;i<d/12;i++){
+    x += stepX; y += stepY;
+    for (const w of g.obstacles){
+      if (x > w.x && x < w.x+w.w && y > w.y && y < w.y+w.h) return false;
+    }
+  }
+  return true;
+}
+
+/* Which motes would hit me if I stood perfectly still, and when. */
+function cpuThreats(g, p){
+  const list = [], step = 1/40, horizon = 1.1;
+  for (const mo of g.motes){
+    if (!mo.armed && mo.owner === p.idx) continue;       // inert in my own hands
+    let x = mo.x, y = mo.y, vx = mo.vx, vy = mo.vy, t = 0;
+    const r = mo.radius;
+    while (t < horizon){
+      x += vx*step; y += vy*step; t += step;
+      const b = g.bounds();
+      if (x < b.x+r){ x=b.x+r; vx=-vx; } else if (x > b.x+b.w-r){ x=b.x+b.w-r; vx=-vx; }
+      if (y < b.y+r){ y=b.y+r; vy=-vy; } else if (y > b.y+b.h-r){ y=b.y+b.h-r; vy=-vy; }
+      let eaten = false;
+      for (const w of g.obstacles){
+        const probe = {x,y}, axis = resolveCircleRect(probe, w, r);
+        if (!axis) continue;
+        x = probe.x; y = probe.y;
+        if (w.void){ eaten = true; break; }
+        if (axis === "x") vx = -vx; else vy = -vy;
+      }
+      if (eaten) break;
+      if (len(x-p.x, y-p.y) <= p.st.radius + r + 8){ list.push({ id:mo.id, mote:mo, t, x, y }); break; }
+    }
+  }
+  list.sort((a,b) => a.t - b.t);
+  return list;
+}
+
+/* Is there a direction that puts a mote into them? Bank shots allowed
+   by level. A line that comes back and kills me does not count. */
+function cpuFindShot(g, p, foe, lvl){
+  const st = p.st, step = 1/40, horizon = 1.5;
+  let best = null;
+  for (const [dx,dy] of DIRS8){
+    const off = st.radius + st.moteRadius + 2, r = st.moteRadius;
+    let x = p.x + dx*off, y = p.y + dy*off;
+    let vx = dx*st.moteSpeed, vy = dy*st.moteSpeed;
+    let t = 0, bounces = 0, hit = null, selfRisk = false;
+    while (t < horizon){
+      x += vx*step; y += vy*step; t += step;
+      const b = g.bounds();
+      let wall = false;
+      if (x < b.x+r){ x=b.x+r; vx=-vx; wall=true; }
+      else if (x > b.x+b.w-r){ x=b.x+b.w-r; vx=-vx; wall=true; }
+      if (y < b.y+r){ y=b.y+r; vy=-vy; wall=true; }
+      else if (y > b.y+b.h-r){ y=b.y+b.h-r; vy=-vy; wall=true; }
+      let eaten = false;
+      for (const w of g.obstacles){
+        const probe = {x,y}, axis = resolveCircleRect(probe, w, r);
+        if (!axis) continue;
+        x = probe.x; y = probe.y;
+        if (w.void){ eaten = true; break; }
+        if (axis === "x") vx = -vx; else vy = -vy;
+        wall = true;
+      }
+      if (eaten) break;
+      if (wall && ++bounces > lvl.bounces) break;
+      const lt = Math.min(t, 0.5) * lvl.lead;              // lead the target
+      const fx = foe.x + foe.vx*lt, fy = foe.y + foe.vy*lt;
+      if (len(x-fx, y-fy) <= foe.st.radius + r + 2){ hit = {t, bounces}; break; }
+      if (bounces >= 1 && len(x-p.x, y-p.y) <= st.radius + r + 8){ selfRisk = true; break; }
+    }
+    if (hit && !selfRisk){
+      const score = hit.t + hit.bounces*0.3 - (dx*p.fx + dy*p.fy)*0.004;
+      if (!best || score < best.score) best = { dir:[dx,dy], score };
+    }
+  }
+  return best;
+}
+
+/* Face the incoming mote, but angled as far toward the sender as the
+   guard arc allows — a parry returns along your facing. */
+function cpuParryFace(p, foe, threat){
+  const toMote = Math.atan2(threat.mote.y - p.y, threat.mote.x - p.x);
+  const toFoe  = Math.atan2(foe.y - p.y, foe.x - p.x);
+  const limit  = p.st.parryArc/2 - 0.10;
+  let best = null;
+  for (const [dx,dy] of DIRS8){
+    const a  = Math.atan2(dy,dx);
+    const dm = Math.abs(Math.atan2(Math.sin(a-toMote), Math.cos(a-toMote)));
+    if (dm > limit) continue;
+    const df = Math.abs(Math.atan2(Math.sin(a-toFoe), Math.cos(a-toFoe)))
+             - (dx*p.fx + dy*p.fy)*0.001;
+    if (!best || df < best.df) best = { dir:[dx,dy], df };
+  }
+  if (best) return best.dir;
+  const a = Math.round(toMote / (Math.PI/4)) & 7;
+  return DIRS8[a];
+}
+
+function cpuEscape(g, p, threats){
+  let best = null;
+  for (const [dx,dy] of DIRS8){
+    const px = p.x + dx*p.st.maxSpeed*0.32, py = p.y + dy*p.st.maxSpeed*0.32;
+    if (cpuBlocked(g, px, py, p.st.radius)) continue;
+    let score = 1e9;
+    for (const t of threats) score = Math.min(score, len(px-t.x, py-t.y));
+    score += (dx*p.fx + dy*p.fy) * 0.5;
+    for (const mo of g.motes){
+      if (!mo.armed && mo.owner === p.idx) continue;
+      score = Math.min(score, len(px-mo.x, py-mo.y) + 40);
+    }
+    const b = g.bounds();
+    score += Math.min(px-b.x, b.x+b.w-px, py-b.y, b.y+b.h-py) * 0.3;
+    if (!best || score > best.score) best = { dir:[dx,dy], score };
+  }
+  return best ? best.dir : [0,0];
+}
+
+function cpuRoam(g, p, foe, threats, lvl){
+  const b = g.bounds();
+  const circle = Math.atan2(foe.y-p.y, foe.x-p.x)
+               + (Math.floor(g.time/1.7) % 2 ? 1 : -1) * Math.PI/2;
+  let best = null;
+  for (const [dx,dy] of DIRS8){
+    const px = p.x + dx*p.st.maxSpeed*0.35, py = p.y + dy*p.st.maxSpeed*0.35;
+    if (cpuBlocked(g, px, py, p.st.radius)) continue;
+    let score = -Math.abs(len(foe.x-px, foe.y-py) - lvl.keepAt) * 0.02;
+    for (const t of threats) score -= Math.max(0, 170 - len(px-t.x, py-t.y)) * 0.04;
+    for (const mo of g.motes){
+      if (!mo.armed && mo.owner === p.idx) continue;
+      score -= Math.max(0, 95 - len(px-mo.x, py-mo.y)) * 0.06;
+    }
+    score += Math.min(px-b.x, b.x+b.w-px, py-b.y, b.y+b.h-py) * 0.03;
+    score += (dx*Math.cos(circle) + dy*Math.sin(circle)) * 1.1;
+    score += (dx*p.fx + dy*p.fy) * 0.04;
+    if (!best || score > best.score) best = { dir:[dx,dy], score };
+  }
+  return best ? best.dir : [0,0];
+}
+
+/* One rule per keeper — each special is spent where it actually pays. */
+function cpuSpecialWanted(g, p, foe, lvl, worst, shot){
+  if (!p.ready) return false;
+  if (cpuDraw(p, Math.round(g.time*4)*31, 5) > lvl.specialOdds) return false;
+  const dFoe = len(foe.x-p.x, foe.y-p.y);
+  switch (p.char.id){
+    case "ines":  return !!shot || (p.ammo === 0 && dFoe < 430);
+    case "cato":  return !!worst && worst.t < 0.30 && p.dashCd > 0;
+    case "meran": return !!shot && !p.primed && p.ammo > 0;
+    case "odall": return !worst && dFoe < 500 && cpuClearLine(g, foe, p);
+    case "silt":  return !!worst && worst.t < 0.22 && p.parryCd > 0;
+    case "vane":  return g.motes.some(mo => mo.owner === p.idx && mo.armed &&
+                         len(mo.x-foe.x, mo.y-foe.y) < 280 &&
+                         (mo.x-foe.x)*mo.vx + (mo.y-foe.y)*mo.vy > 0);
+    case "keel":  return !!worst && worst.t < 0.5;
+    case "auger": return !!worst && worst.t > 0.25 && worst.t < 0.9;
+  }
+  return false;
+}
+
+function cpuFace(p, target){
+  const a = Math.atan2(target.y - p.y, target.x - p.x);
+  return DIRS8[(Math.round(a / (Math.PI/4)) & 7)];
+}
+
+/* The deliberate part: runs on the level's reaction clock, not every frame. */
+function cpuPlan(g, seat, lvl, m){
+  const p = g.players[seat], foe = g.players[1-seat];
+  m.parryTarget = 0;
+  if (!p.alive || !foe.alive || g.result){ m.dir = [0,0]; return; }
+
+  const threats = cpuThreats(g, p);
+  const worst = threats[0];
+  const shot = (p.fireCd <= 0 && p.ammo > 0) ? cpuFindShot(g, p, foe, lvl) : null;
+  const wantSpecial = cpuSpecialWanted(g, p, foe, lvl, worst, shot);
+
+  // Specials that need to be aimed somewhere specific go first.
+  if (wantSpecial && (p.char.id === "odall" || p.char.id === "auger")){
+    m.special = true;
+    m.dir = cpuFace(p, p.char.id === "odall" ? foe : (worst || foe));
+    return;
+  }
+  if (wantSpecial && (p.char.id === "cato" || p.char.id === "silt" || p.char.id === "keel" ||
+                      p.char.id === "vane" || p.char.id === "meran")){
+    m.special = true;
+    if (p.char.id === "meran" && shot) m.dir = shot.dir;
+    else m.dir = worst ? cpuEscape(g, p, threats) : m.dir;
+    if (p.char.id !== "meran") return;
+  }
+
+  // Commit to a parry — the press itself is timed frame by frame below.
+  if (worst && worst.t < 0.55 && p.parryCd <= 0 && p.ghost <= 0 &&
+      cpuDraw(p, worst.id*17, 11) < lvl.parryOdds){
+    m.parryTarget = worst.id;
+    m.dir = cpuParryFace(p, foe, worst);
+    return;
+  }
+
+  // Otherwise get out of the way.
+  if (worst && worst.t < 0.42){
+    m.dir = cpuEscape(g, p, threats);
+    if (p.dashCd <= 0 && worst.t < 0.26 && cpuDraw(p, worst.id*29, 23) < lvl.dashOdds) m.dash = true;
+    return;
+  }
+
+  // Or take the shot, if there is one and the hands are steady.
+  if (shot){
+    const jitter = cpuDraw(p, Math.round(g.time*30)*3, 37);
+    if (jitter >= lvl.hesitate){
+      m.dir = shot.dir;
+      if (p.char.id === "ines" && wantSpecial) m.special = true; else m.fire = true;
+      return;
+    }
+  }
+  if (p.fireCd <= 0 && p.ammo > 0 && lvl.blindFire > 0 &&
+      cpuDraw(p, Math.round(g.time*7)*41, 53) < lvl.blindFire){
+    m.dir = cpuFace(p, foe);
+    m.fire = true;
+    return;
+  }
+  m.dir = cpuRoam(g, p, foe, threats, lvl);
+}
+
+/* Called every frame: holds the plan, and times the guard press itself. */
+function cpuInput(g, seat, dt){
+  let m = CPU.mem[seat];
+  if (!m || m.round !== g.round){ m = CPU.mem[seat] = cpuMem(); m.round = g.round; }
+  const lvl = CPU_LEVELS[CPU.level];
+
+  m.t -= dt;
+  if (m.t <= 0){ m.t = lvl.think; cpuPlan(g, seat, lvl, m); }
+
+  const i = blankInput();
+  i.ax = m.dir[0]; i.ay = m.dir[1];
+  i.fire = m.fire; i.dash = m.dash; i.special = m.special;
+  m.fire = m.dash = m.special = false;              // an edge lasts one frame
+
+  if (m.parryTarget){
+    const p = g.players[seat];
+    const mo = g.motes.find(x => x.id === m.parryTarget);
+    if (!mo || !p.alive) m.parryTarget = 0;
+    else {
+      const d = len(mo.x - p.x, mo.y - p.y);
+      const closing = d / (len(mo.vx, mo.vy) || 1);
+      if (closing <= 0.055 || d <= p.st.parryReach*0.8){ i.parry = true; m.parryTarget = 0; }
+    }
+  }
+  return i;
+}
+
+/* The CPU answers your pick on the select screen, then locks its own. */
+const CPU_COUNTER = { ines:"keel", cato:"auger", meran:"odall", odall:"silt",
+                      silt:"vane", vane:"meran", keel:"cato", auger:"ines" };
+
+function cpuSelectInput(seat){
+  const i = blankInput();
+  const human = 1 - seat;
+  if (!SELECT_STATE.locked[human]) return i;         // let them commit first
+  const now = performance.now();
+  if (now < CPU.selT) return i;
+  CPU.selT = now + 240;                              // a step every 240ms, so it can be watched
+
+  const target = Math.max(0, CHARS.findIndex(c =>
+    c.id === CPU_COUNTER[CHARS[SELECT_STATE.cursor[human]].id]));
+  const cur = SELECT_STATE.cursor[seat];
+  if (cur === target){ i.fire = true; return i; }
+
+  const cc = cur % SEL_COLS, cr = Math.floor(cur / SEL_COLS);
+  const tc = target % SEL_COLS, tr = Math.floor(target / SEL_COLS);
+  if (cc !== tc) i.ax = Math.sign(tc - cc); else i.ay = Math.sign(tr - cr);
+  return i;
+}
+
+/* ============================================================
    STATE MACHINE
    ============================================================ */
-const ST = { MENU:0, NET:1, SELECT:2, CARD:3, PLAY:4, EPI:5 };
+const ST = { MENU:0, NET:1, SELECT:2, CARD:3, PLAY:4, EPI:5, DIFF:6 };
 let state = ST.MENU;
 let game = new Game();
 let cardIdx = 0, resultLine = "", epiWinner = 0;
@@ -1444,6 +1804,7 @@ function uiPacket(){
 
 function toMenu(){
   state = ST.MENU; lastUiKey = "";
+  CPU.seats = [false,false]; CPU.mem = [null,null];
   game = new Game();
   netTeardown();
   menuCard();
@@ -1536,25 +1897,36 @@ function tick(now){
     return;
   }
 
-  const seatInputs = () => netMode === "host"
-    ? [readInput(0), remoteInput()]
-    : [readInput(0), readInput(1)];
+  const seatInputs = () => {
+    if (netMode === "host") return [readInput(0), remoteInput()];
+    return [0,1].map(s => CPU.seats[s] ? cpuInput(game, s, dt) : readInput(s));
+  };
 
   switch (state){
     case ST.MENU:
-      if (edge.has("Digit1") || edge.has("Numpad1")){ netMode = "local"; startSelect(); }
+      if (edge.has("Digit1") || edge.has("Numpad1")){ netMode = "local"; CPU.seats = [false,false]; startSelect(); }
       else if (edge.has("Digit2") || edge.has("Numpad2")) hostFlow();
       else if (edge.has("Digit3") || edge.has("Numpad3")) joinFlow();
+      else if (edge.has("Digit4") || edge.has("Numpad4")){ state = ST.DIFF; difficultyCard(); }
       break;
+
+    case ST.DIFF: {
+      const pick = ["Digit1","Digit2","Digit3"].findIndex(k => edge.has(k));
+      if (pick >= 0){ netMode = "local"; CPU.level = pick; CPU.seats = [false,true]; startSelect(); }
+      break;
+    }
 
     case ST.NET:
       break;
 
     case ST.SELECT: {
-      stepSelect(seatInputs());
+      stepSelect([0,1].map(s =>
+        CPU.seats[s] ? cpuSelectInput(s)
+        : (netMode === "host" && s === 1) ? remoteInput() : readInput(s)));
       if (state === ST.SELECT)
         renderSelect(SELECT_STATE, { selHint: netMode === "host"
           ? "you hold the left seat — they choose for themselves"
+          : CPU.seats[1] ? "take your mirror — the tower answers with its own"
           : "player one on W A S D, player two on the arrows" });
       break;
     }
