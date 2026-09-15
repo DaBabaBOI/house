@@ -83,6 +83,8 @@ earns exactly nothing, and so does running and dashing. It fills only from:
 
 ## Controls
 
+Defaults:
+
 | | Player one | Player two |
 |---|---|---|
 | Move | `W A S D` | arrow keys |
@@ -92,7 +94,19 @@ earns exactly nothing, and so does running and dashing. It fills only from:
 | Dash | `E` | `/` |
 | Special | `F` | `;` |
 
-`V` locks the camera to the whole coast.
+**Every one of those is rebindable.** Menu option 6 opens a key table for both
+players: click a key, press the one you want. A key only ever does one thing, so
+giving it away takes it from wherever it was — and the screen says plainly if
+that has left an action with nothing bound to it. `Esc` cancels a binding rather
+than assigning `Esc`.
+
+Bindings are saved in the browser and survive a reload; if the browser refuses
+storage the screen says so and they last for the session. There is a reset to
+defaults. Whatever a player binds to fire also works to advance the story cards
+and lock in a keeper.
+
+`V` locks the camera to the whole coast. Mouse aiming is player one's and is not
+rebindable.
 
 `Esc` returns to the menu. Online, both players use the left-hand set.
 

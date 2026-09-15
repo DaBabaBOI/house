@@ -57,6 +57,17 @@
     background:#1b3350;color:#eaf1f9;border:1px solid #47709a;border-radius:8px;padding:13px 26px;}
   .go:hover{background:#25456a;}
   @media (max-width:640px){ .row{grid-template-columns:22px 1fr;} .row .h{grid-column:2;text-align:left;} }
+  table.keys2{border-collapse:collapse;width:100%;margin:20px 0 4px;}
+  table.keys2 th{font:600 10px ui-monospace,monospace;letter-spacing:.26em;text-transform:uppercase;
+    color:var(--dim);text-align:left;padding:0 10px 10px 0;font-weight:600;}
+  table.keys2 td{padding:4px 10px 4px 0;}
+  table.keys2 td.act{font-size:15px;color:#c3cedd;width:44%;}
+  .keycap{min-width:104px;cursor:pointer;color:#e8eef7;font-family:inherit;
+    background:#0e1720;border:1px solid #2b3a4d;border-bottom-width:2px;border-radius:6px;
+    padding:8px 10px;font:600 13px/1.2 ui-monospace,monospace;transition:background .12s,border-color .12s;}
+  .keycap:hover{background:#17293c;border-color:#456e96;}
+  .keycap.listening{background:#25456a;border-color:#7fb0dd;color:#fff;}
+  .keycap.clash{border-color:#c2703f;}
   .blink{animation:blink 1.6s ease-in-out infinite;}
   @keyframes blink{0%,100%{opacity:.45}50%{opacity:1}}
   @media (prefers-reduced-motion:reduce){.card,.blink{animation:none;}}
@@ -322,15 +333,23 @@ const ROUND_FLAVOR = [
    INPUT
    ============================================================ */
 const held = new Set(), edge = new Set();
-const BLOCK = new Set(["Space","ArrowUp","ArrowDown","ArrowLeft","ArrowRight",
-                       "Slash","Period","Comma","Semicolon","Quote",
-                       "KeyQ","KeyE","KeyF","KeyZ","KeyX","KeyL"]);
+const BLOCK = new Set();
 
 const typing = e => {
   const t = e.target;
   return t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT");
 };
+let REBIND = null;                       // {seat, action} while listening for a key
+
 addEventListener("keydown", e => {
+  if (REBIND){
+    e.preventDefault();
+    const { seat, action } = REBIND;
+    REBIND = null;
+    if (e.code !== "Escape") assignKey(seat, action, e.code);
+    controlsCard();
+    return;
+  }
   if (typing(e)){ if (e.code === "Escape") { held.add(e.code); edge.add(e.code); } return; }
   if (BLOCK.has(e.code)) e.preventDefault();
   if (e.repeat) return;
@@ -342,14 +361,88 @@ addEventListener("blur", () => { held.clear(); edge.clear(); });
 const hasHeld = k => Array.isArray(k) ? k.some(x => held.has(x)) : held.has(k);
 const hasEdge = k => Array.isArray(k) ? k.some(x => edge.has(x)) : edge.has(k);
 
-const SCHEMES = [
+const ACTIONS = [
+  { id:"up",      label:"Move up" },
+  { id:"down",    label:"Move down" },
+  { id:"left",    label:"Move left" },
+  { id:"right",   label:"Move right" },
+  { id:"turnL",   label:"Turn mirror left" },
+  { id:"turnR",   label:"Turn mirror right" },
+  { id:"fire",    label:"Fire" },
+  { id:"parry",   label:"Guard / parry" },
+  { id:"dash",    label:"Dash" },
+  { id:"special", label:"Special" },
+];
+
+const defaultSchemes = () => ([
   { up:"KeyW", down:"KeyS", left:"KeyA", right:"KeyD",
-    fire:"Space", parry:"KeyQ", dash:"KeyE", special:["KeyF","KeyR"],
+    fire:"Space", parry:"KeyQ", dash:"KeyE", special:"KeyF",
     turnL:"KeyZ", turnR:"KeyX" },
   { up:"ArrowUp", down:"ArrowDown", left:"ArrowLeft", right:"ArrowRight",
-    fire:"Period", parry:"Comma", dash:"Slash", special:["Semicolon","ShiftRight","Numpad0"],
+    fire:"Period", parry:"Comma", dash:"Slash", special:"Semicolon",
     turnL:"KeyL", turnR:"Quote" },
-];
+]);
+
+const KEY_STORE = "saltline.controls.v1";
+let KEYS_SAVED = true;                      // false when the browser refuses storage
+
+function loadSchemes(){
+  const out = defaultSchemes();
+  try {
+    const raw = localStorage.getItem(KEY_STORE);
+    if (raw){
+      const saved = JSON.parse(raw);
+      saved.forEach((sc, i) => {
+        if (!out[i] || !sc) return;
+        for (const a of ACTIONS) if (typeof sc[a.id] === "string") out[i][a.id] = sc[a.id];
+      });
+    }
+  } catch { KEYS_SAVED = false; }
+  return out;
+}
+function saveSchemes(){
+  try { localStorage.setItem(KEY_STORE, JSON.stringify(SCHEMES)); KEYS_SAVED = true; }
+  catch { KEYS_SAVED = false; }
+  return KEYS_SAVED;
+}
+
+let SCHEMES = loadSchemes();
+
+/* A key does one thing. Giving it to something else takes it away from
+   wherever it was, on either side of the keyboard. */
+function assignKey(seat, action, code){
+  for (const sc of SCHEMES)
+    for (const a of ACTIONS)
+      if (sc[a.id] === code) sc[a.id] = "";
+  SCHEMES[seat][action] = code;
+  saveSchemes();
+  refreshBlocked();
+}
+function resetKeys(){ SCHEMES = defaultSchemes(); saveSchemes(); refreshBlocked(); }
+
+/* Anything bound to a keeper should not also scroll the page or open a
+   browser find bar, so every bound key has its default swallowed. */
+function refreshBlocked(){
+  BLOCK.clear();
+  for (const sc of SCHEMES) for (const a of ACTIONS) if (sc[a.id]) BLOCK.add(sc[a.id]);
+  for (const k of ["Space","ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Slash","Quote"]) BLOCK.add(k);
+}
+
+const KEY_NAMES = {
+  Space:"Space", Period:".", Comma:",", Slash:"/", Semicolon:";", Quote:"'",
+  ArrowUp:"\u2191", ArrowDown:"\u2193", ArrowLeft:"\u2190", ArrowRight:"\u2192",
+  ShiftLeft:"L-Shift", ShiftRight:"R-Shift", ControlLeft:"L-Ctrl", ControlRight:"R-Ctrl",
+  AltLeft:"L-Alt", AltRight:"R-Alt", Enter:"Enter", Tab:"Tab", Backquote:"`",
+  Minus:"-", Equal:"=", BracketLeft:"[", BracketRight:"]", Backslash:"\\",
+};
+function keyName(code){
+  if (!code) return "—";
+  if (KEY_NAMES[code]) return KEY_NAMES[code];
+  if (code.startsWith("Key")) return code.slice(3);
+  if (code.startsWith("Digit")) return code.slice(5);
+  if (code.startsWith("Numpad")) return "Num " + code.slice(6);
+  return code;
+}
 
 function blankInput(){
   return {ax:0, ay:0, aim:null, turn:0,
@@ -400,7 +493,9 @@ function readInput(schemeIndex){
 // Either player may advance a story card in local play.
 function anyConfirm(){
   if (UI_CONFIRM){ UI_CONFIRM = false; return true; }
-  return edge.has("Space") || edge.has("Enter") || edge.has("Period");
+  // whatever either player has bound to fire, plus two keys that always work
+  if (hasEdge(SCHEMES[0].fire) || hasEdge(SCHEMES[1].fire)) return true;
+  return edge.has("Space") || edge.has("Enter");
 }
 
 /* ============================================================
@@ -1533,25 +1628,21 @@ function menuCard(){
       { label:"Join with a code", hint:"someone sent you four letters" },
       { label:"Alone, against the tower", hint:"one keeper, four levels" },
       { label:"Battle royale against the tower", hint:"up to six, last lamp burning" },
+      { label:"Controls", hint:"bind the keys however you like" },
     ])}
     <div class="keys">
-      <section>
-        <h3>Player one</h3>
-        <dl><dt>W A S D</dt><dd>move</dd>
-            <dt>mouse</dt><dd>aim anywhere</dd>
-            <dt>click / Space</dt><dd>fire</dd>
-            <dt>right-click / Q</dt><dd>guard / parry</dd>
-            <dt>E</dt><dd>dash</dd><dt>F</dt><dd>special</dd>
-            <dt>Z X</dt><dd>turn, if you would rather not use the mouse</dd></dl>
-      </section>
-      <section>
-        <h3>Player two</h3>
-        <dl><dt>&uarr; &darr; &larr; &rarr;</dt><dd>move</dd>
-            <dt>L and '</dt><dd>turn the mirror</dd>
-            <dt>. period</dt><dd>fire</dd>
-            <dt>, comma</dt><dd>guard / parry</dd><dt>/ slash</dt><dd>dash</dd>
-            <dt>; semicolon</dt><dd>special</dd></dl>
-      </section>
+      ${[0,1].map(seat => `<section>
+        <h3>Player ${seat === 0 ? "one" : "two"}</h3>
+        <dl>
+          <dt>${["up","left","down","right"].map(k => keyName(SCHEMES[seat][k])).join(" ")}</dt><dd>move</dd>
+          ${seat === 0 ? `<dt>mouse</dt><dd>aim anywhere</dd>` : ``}
+          <dt>${keyName(SCHEMES[seat].turnL)} ${keyName(SCHEMES[seat].turnR)}</dt><dd>turn the mirror</dd>
+          <dt>${seat === 0 ? "click / " : ""}${keyName(SCHEMES[seat].fire)}</dt><dd>fire</dd>
+          <dt>${seat === 0 ? "right-click / " : ""}${keyName(SCHEMES[seat].parry)}</dt><dd>guard / parry</dd>
+          <dt>${keyName(SCHEMES[seat].dash)}</dt><dd>dash</dd>
+          <dt>${keyName(SCHEMES[seat].special)}</dt><dd>special</dd>
+        </dl>
+      </section>`).join("")}
     </div>
     <p class="hint" style="margin-top:20px">Your mirror turns anywhere you point it — aim and
        movement are separate, so you can back away from one mote while answering the keeper who
@@ -1566,7 +1657,53 @@ function menuCard(){
     { fn:() => joinCard("", "") },
     { fn:() => { netMode = "local"; SEAT_COUNT = 2; pendingSeats = 2; state = ST.DIFF; difficultyCard(); } },
     { fn:() => { netMode = "local"; state = ST.COUNT; royaleSetupCard(); } },
+    { fn:() => { state = ST.KEYS; controlsCard(); } },
   ]);
+}
+
+function controlsCard(){
+  const cell = (seat, a) => {
+    const live = REBIND && REBIND.seat === seat && REBIND.action === a.id;
+    const code = SCHEMES[seat][a.id];
+    return `<button class="keycap${live ? " listening" : ""}${code ? "" : " clash"}"
+             data-seat="${seat}" data-act="${a.id}">${live ? "press a key…" : keyName(code)}</button>`;
+  };
+  const rows = ACTIONS.map(a =>
+    `<tr><td class="act">${a.label}</td><td>${cell(0,a)}</td><td>${cell(1,a)}</td></tr>`).join("");
+
+  show(`
+    <div class="kicker">Controls</div>
+    <h2>Bind them however you like</h2>
+    <p>Click a key and press the one you want. A key only ever does one thing, so
+       giving it away takes it from wherever it was. <kbd>Esc</kbd> cancels a binding.</p>
+    <table class="keys2">
+      <tr><th></th><th>Player one</th><th>Player two</th></tr>
+      ${rows}
+    </table>
+    <p class="hint">Player one can also aim with the mouse — move to aim, left-click to fire,
+       right-click to guard. <kbd>V</kbd> locks the camera, <kbd>Esc</kbd> leaves a match.</p>
+    ${(() => {
+      const gaps = [];
+      SCHEMES.forEach((sc, seat) => ACTIONS.forEach(a => {
+        if (!sc[a.id]) gaps.push(`player ${seat===0?"one":"two"} — ${a.label.toLowerCase()}`);
+      }));
+      return gaps.length
+        ? `<p class="hint" style="color:#e0a06a">Nothing bound for ${gaps.join(", ")}.</p>` : ``;
+    })()}
+    ${KEYS_SAVED ? `<p class="hint">Saved on this machine, so they survive a reload.</p>`
+                 : `<p class="hint">This browser will not let the page store anything, so these
+                    last until you close the tab.</p>`}
+    <button ${BTNS} id="resetkeys">RESET TO DEFAULTS</button>
+    <button ${BTNS} id="donekeys">DONE</button>
+  `);
+
+  overlay.querySelectorAll(".keycap").forEach(el => {
+    el.onclick = () => { REBIND = { seat:+el.dataset.seat, action:el.dataset.act }; controlsCard(); };
+  });
+  const r = document.getElementById("resetkeys");
+  if (r) r.onclick = () => { REBIND = null; resetKeys(); controlsCard(); };
+  const d = document.getElementById("donekeys");
+  if (d) d.onclick = () => { REBIND = null; toMenu(); };
 }
 
 function lobbyCard(){
@@ -2715,7 +2852,7 @@ function cpuSelectInput(seat){
 /* ============================================================
    STATE MACHINE
    ============================================================ */
-const ST = { MENU:0, NET:1, SELECT:2, CARD:3, PLAY:4, EPI:5, DIFF:6, COUNT:7, LOBBY:8 };
+const ST = { MENU:0, NET:1, SELECT:2, CARD:3, PLAY:4, EPI:5, DIFF:6, COUNT:7, LOBBY:8, KEYS:9 };
 let state = ST.MENU;
 let game = new Game();
 let cardIdx = 0, resultLine = "", epiWinner = 0, pendingSeats = 2;
@@ -2871,6 +3008,9 @@ function tick(now){
       if (netMode === "host" && (edge.has("Enter") || edge.has("Space"))) startSelect();
       break;
 
+    case ST.KEYS:
+      break;
+
     case ST.NET:
       break;
 
@@ -2918,6 +3058,7 @@ function tick(now){
   MOUSE.fire = MOUSE.parry = false;
 }
 
+refreshBlocked();
 menuCard();
 const linkCode = (location.hash || "").replace(/^#/,"").toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,4);
 if (linkCode.length === 4) joinOnline(linkCode);
