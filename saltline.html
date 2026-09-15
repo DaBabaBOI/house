@@ -43,6 +43,20 @@
   kbd{display:inline-block;border:1px solid #2b3a4d;border-bottom-width:2px;border-radius:4px;
     padding:1px 6px;background:#0e1720;color:#e8eef7;font:600 12px/1.5 ui-monospace,monospace;}
   .rule{height:1px;background:linear-gradient(90deg,transparent,var(--edge),transparent);margin:26px 0;}
+  .rows{display:flex;flex-direction:column;gap:9px;margin:24px 0 4px;}
+  .row{display:grid;grid-template-columns:26px 1fr auto;align-items:baseline;gap:16px;
+    width:100%;text-align:left;cursor:pointer;color:var(--ink);font-family:inherit;
+    background:rgba(14,23,32,.8);border:1px solid #223246;border-radius:8px;padding:13px 16px;
+    transition:background .12s,border-color .12s;}
+  .row:hover,.row.on{background:#17293c;border-color:#456e96;}
+  .row .n{font:600 11px ui-monospace,monospace;color:var(--dim);}
+  .row .t{font-size:17px;line-height:1.3;}
+  .row .h{font:500 11px ui-monospace,monospace;color:var(--dim);letter-spacing:.06em;text-align:right;}
+  .row.on .n,.row.on .h{color:#b9c8da;}
+  .go{margin:22px 0 0;cursor:pointer;font:600 13px/1 ui-monospace,monospace;letter-spacing:.18em;
+    background:#1b3350;color:#eaf1f9;border:1px solid #47709a;border-radius:8px;padding:13px 26px;}
+  .go:hover{background:#25456a;}
+  @media (max-width:640px){ .row{grid-template-columns:22px 1fr;} .row .h{grid-column:2;text-align:left;} }
   .blink{animation:blink 1.6s ease-in-out infinite;}
   @keyframes blink{0%,100%{opacity:.45}50%{opacity:1}}
   @media (prefers-reduced-motion:reduce){.card,.blink{animation:none;}}
@@ -64,7 +78,8 @@
    and those touch nothing that decides a round.
    ============================================================ */
 
-const W = 960, H = 600;
+const W = 1920, H = 1200;          // the world
+const VW = 960, VH = 600;          // what fits on screen at rest
 const cvs = document.getElementById("c");
 const ctx = cvs.getContext("2d");
 const overlay = document.getElementById("overlay");
@@ -74,31 +89,68 @@ const overlay = document.getElementById("overlay");
 let viewScale = 1;
 function fitCanvas(){
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const s = Math.min((innerWidth - 32) / W, (innerHeight - 32) / H);
+  const s = Math.min((innerWidth - 32) / VW, (innerHeight - 32) / VH);
   viewScale = Math.max(0.4, s);
-  cvs.style.width  = (W * viewScale) + "px";
-  cvs.style.height = (H * viewScale) + "px";
-  cvs.width  = Math.round(W * viewScale * dpr);
-  cvs.height = Math.round(H * viewScale * dpr);
+  cvs.style.width  = (VW * viewScale) + "px";
+  cvs.style.height = (VH * viewScale) + "px";
+  cvs.width  = Math.round(VW * viewScale * dpr);
+  cvs.height = Math.round(VH * viewScale * dpr);
   viewScale *= dpr;
+}
+
+/* The camera holds every living keeper in frame, pulling back when they
+   spread out and closing in when the duel tightens. */
+const CAM = { x:W/2, y:H/2, zoom:1, tx:W/2, ty:H/2, tz:1 };
+const CAM_MIN = 0.42, CAM_MAX = 1.0;
+
+function updateCamera(g, dt){
+  const watched = g.alive.length ? g.alive : g.players;
+  let x0=1e9, y0=1e9, x1=-1e9, y1=-1e9;
+  for (const p of watched){
+    x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x);
+    y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y);
+  }
+  for (const m of g.motes){            // keep live motes in shot where cheap
+    x0 = Math.min(x0, m.x); x1 = Math.max(x1, m.x);
+    y0 = Math.min(y0, m.y); y1 = Math.max(y1, m.y);
+  }
+  const pad = 190;
+  const bw = (x1-x0) + pad*2, bh = (y1-y0) + pad*2;
+  CAM.tz = clamp(Math.min(VW/bw, VH/bh), CAM_MIN, CAM_MAX);
+  CAM.tx = (x0+x1)/2; CAM.ty = (y0+y1)/2;
+
+  const halfW = VW/(2*CAM.tz), halfH = VH/(2*CAM.tz);
+  CAM.tx = halfW*2 >= W ? W/2 : clamp(CAM.tx, halfW, W-halfW);
+  CAM.ty = halfH*2 >= H ? H/2 : clamp(CAM.ty, halfH, H-halfH);
+
+  const k = 1 - Math.exp(-6*dt);      // ease, so it never snaps
+  CAM.zoom += (CAM.tz - CAM.zoom)*k;
+  CAM.x    += (CAM.tx - CAM.x)*k;
+  CAM.y    += (CAM.ty - CAM.y)*k;
+}
+function camReset(g){
+  updateCamera(g, 1);
+  CAM.zoom = CAM.tz; CAM.x = CAM.tx; CAM.y = CAM.ty;
 }
 addEventListener("resize", fitCanvas);
 fitCanvas();
 
 /* ---------- shared tuning ---------- */
 const BASE = {
-  accel:2600, maxSpeed:265, friction:9.0, radius:13,
-  dashSpeed:760, dashTime:0.16, dashCd:1.35,
+  accel:3000, maxSpeed:330, friction:9.0, radius:13,
+  dashSpeed:940, dashTime:0.17, dashCd:1.25,
   ammo:3, fireCd:0.22, reload:0.9,
-  moteSpeed:520, moteRadius:5, moteBounces:5, moteLife:6.0, armTime:0.45,
-  parryTime:0.14, parryCd:0.9, parryReach:38, parryArc:Math.PI*0.62, returnSpeed:660,
+  moteSpeed:470, moteRadius:5, moteBounces:5, moteLife:8.0, armTime:0.45,
+  parryTime:0.14, parryCd:0.9, parryReach:38, parryArc:Math.PI*0.62, returnSpeed:600,
   bounceGain:1,                      // velocity multiplier applied on each bounce
 };
 
 const ROUND_TIME  = 45;    // seconds before the dark starts closing
-const CLOSE_STEP  = 1.4;
-const CLOSE_AMOUNT= 24;
-const WINS_NEEDED = 3;
+const CLOSE_STEP  = 1.25;
+const CLOSE_AMOUNT= 46;
+const WINS_NEEDED = 3;      // the duel: first to three rounds
+const WINS_BR     = 2;      // battle royale: first to two rounds
+const MAX_SEATS   = 6;
 
 /* Charge is earned by skill, never by waiting: parries, keeping your own
    motes alive off the walls, and slipping past a live one. */
@@ -116,13 +168,13 @@ const CHARS = [
     passive:"Steady hand — motes fly faster, and spent shots come back sooner.",
     special:"SECOND WICK", specialText:"Fires three motes in a tight fan.",
     ending:"keeps the wick trimmed so low it burns a hundred years on nothing.",
-    stats:{ moteSpeed:575, reload:0.6 } },
+    stats:{ moteSpeed:520, reload:0.6 } },
 
   { id:"cato", name:"CATO", title:"The Tidewatcher", color:"#7fe8ff",
     passive:"Undertow — a longer, faster dash on a shorter leash.",
     special:"EBB", specialText:"Snap back to where you stood a moment ago.",
     ending:"learns the tide so well the tide starts keeping time by her.",
-    stats:{ dashSpeed:880, dashTime:0.19, dashCd:0.95 } },
+    stats:{ dashSpeed:1080, dashTime:0.20, dashCd:0.95 } },
 
   { id:"meran", name:"MERAN", title:"The Glassblower", color:"#9df5c0",
     passive:"Annealed — a wide guard that recovers fast, but only two motes.",
@@ -134,65 +186,73 @@ const CHARS = [
     passive:"Heavy glass — slow, fat motes that ride the walls far longer.",
     special:"BREAKWATER", specialText:"Raise a wall of slag in front of you.",
     ending:"pulls the dead ships off the rocks one winter at a time, and stops counting.",
-    stats:{ maxSpeed:232, accel:2300, moteSpeed:415, moteRadius:9, moteBounces:9, moteLife:8 } },
+    stats:{ maxSpeed:292, accel:2700, moteSpeed:375, moteRadius:9, moteBounces:9, moteLife:10 } },
 
   { id:"silt", name:"SILT", title:"The Mudlark", color:"#c9d66b",
     passive:"Small — a smaller target and quicker feet, but a slower trigger.",
     special:"DUCK UNDER", specialText:"Light passes through you. No shooting, no guard.",
     ending:"goes on finding things in the mud that the flood was supposed to have kept.",
-    stats:{ radius:10, maxSpeed:298, accel:2850, fireCd:0.42, reload:1.15 } },
+    stats:{ radius:10, maxSpeed:372, accel:3300, fireCd:0.42, reload:1.15 } },
 
   { id:"vane", name:"VANE", title:"The Signalman", color:"#c4a6ff",
     passive:"Long focus — motes live longer and gather speed off every wall.",
     special:"RECALL", specialText:"Every mote you own turns around where it is.",
     ending:"sends one message a year to a coast that has nobody left to read it.",
-    stats:{ moteLife:9.5, moteBounces:6, bounceGain:1.085 } },
+    stats:{ moteLife:12, moteBounces:6, bounceGain:1.085 } },
 
   { id:"keel", name:"KEEL", title:"The Bellringer", color:"#8fb6d9",
     passive:"Toll — parried motes come off the mirror hard, on a tighter window.",
     special:"RINGING", specialText:"A ring of sound throws every mote away from you.",
     ending:"rings the hours for a town that drowned, because the hours still pass.",
-    stats:{ parryTime:0.105, returnSpeed:930, parryCd:0.8 } },
+    stats:{ parryTime:0.105, returnSpeed:845, parryCd:0.8 } },
 
   { id:"auger", name:"AUGER", title:"The Welldigger", color:"#e0c36a",
     passive:"Dowser — you see the line your shot will take, two walls ahead.",
     special:"SINKHOLE", specialText:"Open a hole in the floor that drinks light.",
     ending:"digs down past the door under the cistern and does not write what is there.",
-    stats:{ moteSpeed:495, fireCd:0.26 } },
+    stats:{ moteSpeed:450, fireCd:0.26 } },
 ];
 CHARS.forEach(c => c.st = Object.assign({}, BASE, c.stats));
 
-const DEFAULT_PICKS = [0, 1];           // Ines and Cato hold the tower in the story
+const DEFAULT_PICKS = [0, 1, 2, 3, 4, 5];   // Ines and Cato hold the tower in the story
+let SEAT_COUNT = 2;                         // keepers in this match
+let MY_SEAT = 0;                            // which seat this browser drives
+const isBR = () => SEAT_COUNT > 2;
 
 /* ---------- arenas (all 180deg-rotationally symmetric: no side has an edge) ---------- */
 const ARENAS = [
   { name:"The Lamp Room",
-    walls:[ {x:430,y:250,w:100,h:100},
-            {x:150,y:120,w:40,h:140}, {x:770,y:340,w:40,h:140} ],
-    spawns:[[120,300],[840,300]] },
+    walls:[ {x:860,y:550,w:200,h:100},
+            {x:300,y:240,w:80,h:280},   {x:1540,y:680,w:80,h:280},
+            {x:700,y:180,w:220,h:40},   {x:1000,y:980,w:220,h:40} ],
+    spawns:[[560,600],[1360,600]] },
 
   { name:"The Cistern",
-    walls:[ {x:240,y:140,w:120,h:40}, {x:600,y:420,w:120,h:40},
-            {x:240,y:420,w:120,h:40}, {x:600,y:140,w:120,h:40},
-            {x:420,y:260,w:120,h:80, void:true} ],
-    spawns:[[120,120],[840,480]] },
+    walls:[ {x:480,y:280,w:240,h:80},   {x:1200,y:840,w:240,h:80},
+            {x:480,y:840,w:240,h:80},   {x:1200,y:280,w:240,h:80},
+            {x:200,y:560,w:60,h:80},    {x:1660,y:560,w:60,h:80},
+            {x:840,y:520,w:240,h:160, void:true} ],
+    spawns:[[480,360],[1440,840]] },
 
   { name:"The Salt Line",
-    walls:[ {x:200,y:200,w:560,h:24}, {x:200,y:376,w:560,h:24},
-            {x:80,y:280,w:24,h:40},   {x:856,y:280,w:24,h:40} ],
-    spawns:[[120,100],[840,500]] },
+    walls:[ {x:400,y:400,w:1120,h:48},  {x:400,y:752,w:1120,h:48},
+            {x:160,y:560,w:48,h:80},    {x:1712,y:560,w:48,h:80},
+            {x:860,y:180,w:200,h:40},   {x:860,y:980,w:200,h:40} ],
+    spawns:[[420,260],[1500,940]] },
 
   { name:"The Door Below",
-    walls:[ {x:300,y:100,w:40,h:180}, {x:620,y:320,w:40,h:180},
-            {x:140,y:380,w:120,h:24}, {x:700,y:196,w:120,h:24},
-            {x:440,y:270,w:80,h:60, void:true} ],
-    spawns:[[120,300],[840,300]] },
+    walls:[ {x:600,y:200,w:80,h:360},   {x:1240,y:640,w:80,h:360},
+            {x:1240,y:200,w:80,h:200},  {x:600,y:800,w:80,h:200},
+            {x:280,y:760,w:240,h:48},   {x:1400,y:392,w:240,h:48},
+            {x:880,y:540,w:160,h:120, void:true} ],
+    spawns:[[520,600],[1400,600]] },
 
   { name:"One Light",
-    walls:[ {x:380,y:180,w:40,h:40}, {x:540,y:180,w:40,h:40},
-            {x:380,y:380,w:40,h:40}, {x:540,y:380,w:40,h:40},
-            {x:60,y:240,w:24,h:120},  {x:876,y:240,w:24,h:120} ],
-    spawns:[[120,120],[840,480]] },
+    walls:[ {x:760,y:360,w:80,h:80},    {x:1080,y:760,w:80,h:80},
+            {x:1080,y:360,w:80,h:80},   {x:760,y:760,w:80,h:80},
+            {x:120,y:480,w:48,h:240},   {x:1752,y:480,w:48,h:240},
+            {x:860,y:120,w:200,h:48},   {x:860,y:1032,w:200,h:48} ],
+    spawns:[[480,320],[1440,880]] },
 ];
 
 /* ---------- story ----------
@@ -282,6 +342,7 @@ function readInput(schemeIndex){
 }
 // Either player may advance a story card in local play.
 function anyConfirm(){
+  if (UI_CONFIRM){ UI_CONFIRM = false; return true; }
   return edge.has("Space") || edge.has("Enter") || edge.has("Period");
 }
 
@@ -347,28 +408,28 @@ class Mote {
     this.radius = st.moteRadius; this.maxBounces = st.moteBounces;
     this.life = st.moteLife; this.armTime = st.armTime; this.gain = st.bounceGain;
     this.age=0; this.bounces=0; this.armed=false; this.dead=false;
-    this.split=false; this.given=0; this.miss=[false,false]; this.rings=[];
+    this.split=false; this.given=0; this.miss=[]; this.rings=[];
     this.trail=[];
   }
 }
 
 class Game {
   constructor(picks){
-    this.scores=[0,0];
+    const list = (picks && picks.length ? picks : DEFAULT_PICKS.slice(0, SEAT_COUNT));
     this.round=0;
     this.motes=[];
-    this.players=[new Player(0), new Player(1)];
-    this.setPicks(picks || DEFAULT_PICKS);
+    this.players = list.map((c,i) => { const p = new Player(i); p.charId = c; return p; });
+    this.scores = list.map(() => 0);
     this.sparks=[];
     this.shake=0;
     this.loadRound(0);
   }
 
   setPicks(picks){
-    this.players[0].charId = picks[0];
-    this.players[1].charId = picks[1];
+    picks.forEach((c,i) => { if (this.players[i]) this.players[i].charId = c; });
   }
-  get picks(){ return [this.players[0].charId, this.players[1].charId]; }
+  get picks(){ return this.players.map(p => p.charId); }
+  get alive(){ return this.players.filter(p => p.alive); }
 
   loadRound(i){
     this.round = i;
@@ -387,10 +448,37 @@ class Game {
     this.closeTimer = 0;
     this.overTimer = 0;
     this.result = null;              // {winner:0|1|-1}
-    const sp = this.arena.spawns;
-    this.players[0].reset(sp[0][0], sp[0][1]);
-    this.players[1].reset(sp[1][0], sp[1][1]);
-    this.players[0].fx = 1; this.players[1].fx = -1;
+    const sp = this.spawnPoints(this.players.length);
+    this.players.forEach((p,i) => {
+      p.reset(sp[i][0], sp[i][1]);
+      const a = Math.atan2(H/2 - sp[i][1], W/2 - sp[i][0]);   // everyone faces the middle
+      p.fx = Math.cos(a); p.fy = Math.sin(a);
+    });
+  }
+
+  /* Two keepers use the arena's own hand-placed spawns. More than two stand on
+     a ring around the centre, evenly spaced, so the start is the same shape for
+     everyone however many are playing. */
+  spawnPoints(n){
+    if (n === 2) return this.arena.spawns;
+    const out = [];
+    for (let i=0;i<n;i++){
+      const a = -Math.PI/2 + i*2*Math.PI/n;
+      let rx = 760, ry = 470, x = 0, y = 0, ok = false;
+      for (let tries=0; tries<14 && !ok; tries++){
+        x = W/2 + Math.cos(a)*rx; y = H/2 + Math.sin(a)*ry;
+        ok = !this.blockedAt(x, y, 20);
+        if (!ok){ rx -= 44; ry -= 28; }
+      }
+      out.push([clamp(x, 40, W-40), clamp(y, 40, H-40)]);
+    }
+    return out;
+  }
+
+  blockedAt(x, y, r){
+    if (x < r || x > W-r || y < r || y > H-r) return true;
+    for (const w of this.obstacles) if (resolveCircleRect({x,y}, w, r)) return true;
+    return false;
   }
 
   // Every solid thing a mote or a keeper can meet, arena and conjured alike.
@@ -425,7 +513,7 @@ class Game {
           this.encroach += CLOSE_AMOUNT;
         }
       }
-      for (let i=0;i<2;i++) this.stepPlayer(this.players[i], inputs[i], dt);
+      this.players.forEach((p,i) => this.stepPlayer(p, inputs[i] || blankInput(), dt));
       this.stepMotes(dt);
       this.checkDeaths();
     } else {
@@ -633,7 +721,7 @@ class Game {
       if (claim && !tie){
         const p = claim.p;
         mo.owner = p.idx; mo.armed = true; mo.bounces = 0;
-        mo.miss = [false,false];
+        mo.miss = [];
         mo.vx = p.fx * p.st.returnSpeed; mo.vy = p.fy * p.st.returnSpeed;
         mo.x = p.x + p.fx * (p.st.radius + mo.radius + 3);
         mo.y = p.y + p.fy * (p.st.radius + mo.radius + 3);
@@ -682,7 +770,7 @@ class Game {
 
   checkDeaths(){
     if (this.result) return;
-    const dead = [false,false];
+    const dead = this.players.map(() => false);
 
     for (const p of this.players){
       if (!p.alive) continue;
@@ -701,14 +789,19 @@ class Game {
         }
       }
     }
-    if (!dead[0] && !dead[1]) return;
+    if (!dead.some(Boolean)) return;
 
-    for (let i=0;i<2;i++) if (dead[i]){
-      this.players[i].alive = false;
-      this.burst(this.players[i].x, this.players[i].y, this.players[i].char.color, 46, 260);
-    }
+    dead.forEach((d,i) => {
+      if (!d) return;
+      const p = this.players[i];
+      p.alive = false; p.placed = this.alive.length + 1;    // finishing position
+      this.burst(p.x, p.y, p.char.color, 46, 260);
+    });
     this.shake = 1;
-    const winner = dead[0] && dead[1] ? -1 : (dead[0] ? 1 : 0);
+
+    const left = this.alive;
+    if (left.length > 1) return;                 // battle royale carries on
+    const winner = left.length === 1 ? left[0].idx : -1;
     this.result = { winner };
     if (winner >= 0) this.scores[winner]++;
   }
@@ -733,7 +826,7 @@ class Game {
   /* ---------- network snapshot (host -> guest) ---------- */
   snapshot(){
     return {
-      r:this.round, t:this.time, e:this.encroach, sc:this.scores, pk:this.picks,
+      r:this.round, t:this.time, e:this.encroach, sc:this.scores, pk:this.picks, n:this.players.length,
       res:this.result ? this.result.winner : null,
       p:this.players.map(p => [
         Math.round(p.x*10)/10, Math.round(p.y*10)/10,
@@ -753,7 +846,13 @@ class Game {
   }
 
   applySnapshot(s){
-    if (s.pk && (s.pk[0] !== this.players[0].charId || s.pk[1] !== this.players[1].charId)){
+    if (s.n !== this.players.length){            // a keeper joined or left the match
+      SEAT_COUNT = s.n;
+      this.players = s.pk.map((c,i) => { const p = new Player(i); p.charId = c; return p; });
+      this.scores = s.sc.slice();
+      this.loadRound(s.r);
+    }
+    if (s.pk && s.pk.some((c,i) => c !== this.players[i].charId)){
       this.setPicks(s.pk);
       this.players.forEach(p => { p.char = CHARS[p.charId]; p.st = p.char.st; });
     }
@@ -844,7 +943,14 @@ function predictPath(g, p, maxBounces){
 
 function render(g, ui){
   ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
-  ctx.clearRect(0,0,W,H);
+  ctx.clearRect(0,0,VW,VH);
+
+  const sky = ctx.createRadialGradient(VW/2, VH/2, 30, VW/2, VH/2, VW*0.8);
+  sky.addColorStop(0, "#101c2b"); sky.addColorStop(1, "#05080e");
+  ctx.fillStyle = sky; ctx.fillRect(0,0,VW,VH);
+
+  const z = CAM.zoom, k = viewScale*z;
+  ctx.setTransform(k, 0, 0, k, viewScale*(VW/2 - CAM.x*z), viewScale*(VH/2 - CAM.y*z));
   ctx.save();
 
   const grd = ctx.createRadialGradient(W/2, H/2, 40, W/2, H/2, W*0.75);
@@ -905,18 +1011,18 @@ function render(g, ui){
     ctx.globalAlpha = 1;
   }
 
-  // the closing dark
-  if (g.encroach > 0){
-    const e = g.encroach;
-    ctx.fillStyle = "rgba(2,3,6,.94)";
-    ctx.fillRect(0,0,W,e); ctx.fillRect(0,H-e,W,e);
-    ctx.fillRect(0,e,e,H-2*e); ctx.fillRect(W-e,e,e,H-2*e);
-    ctx.strokeStyle = "rgba(120,150,190,.5)"; ctx.lineWidth = 1;
-    ctx.strokeRect(e+.5, e+.5, W-2*e-1, H-2*e-1);
+  // the closing dark, and the nothing beyond the coast
+  {
+    const b = g.bounds(), M = 4000;
+    ctx.fillStyle = "rgba(2,3,6,.95)";
+    ctx.fillRect(-M, -M, W+2*M, b.y+M);
+    ctx.fillRect(-M, b.y+b.h, W+2*M, M+H);
+    ctx.fillRect(-M, b.y, b.x+M, b.h);
+    ctx.fillRect(b.x+b.w, b.y, M+W, b.h);
+    ctx.strokeStyle = g.encroach > 0 ? "rgba(140,170,210,.55)" : "rgba(150,190,230,.2)";
+    ctx.lineWidth = 2/Math.max(CAM.zoom, .4);
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
   }
-
-  ctx.strokeStyle = "rgba(150,190,230,.18)"; ctx.lineWidth = 2;
-  ctx.strokeRect(1, 1, W-2, H-2);
 
   // Auger's dowsing line
   for (const p of g.players){
@@ -1011,6 +1117,7 @@ function render(g, ui){
   }
 
   ctx.restore();
+  ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
   drawHUD(g, ui);
 }
 
@@ -1022,10 +1129,59 @@ function bar(x,y,w,h,frac,color){
 function drawHUD(g, ui){
   ctx.font = "600 12px ui-monospace,SFMono-Regular,Menlo,monospace";
   ctx.textBaseline = "top";
+  if (g.players.length > 2) drawRoyaleRoster(g); else drawDuelHUD(g);
+  drawCentreHUD(g, ui);
+}
 
+const MONO = "ui-monospace,SFMono-Regular,Menlo,monospace";
+
+function drawRoyaleRoster(g){
+  const mine = netMode === "guest" ? MY_SEAT : 0;
+  const standing = g.alive.length;
+  g.players.forEach((p,i) => {
+    const y = 14 + i*30, x = 18, col = p.char.color;
+    ctx.globalAlpha = p.alive ? 1 : 0.3;
+
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(x+5, y+7, 5, 0, 7); ctx.fill();
+    if (!p.alive){
+      ctx.strokeStyle = "#8fa3bb"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, y+7); ctx.lineTo(x+128, y+7); ctx.stroke();
+    }
+
+    ctx.textAlign = "left";
+    ctx.font = "600 11px " + MONO;
+    ctx.fillStyle = p.alive ? "#e8eef7" : "#7b8899";
+    const tag = i === mine && !CPU.seats[i] ? " ◂you" : (CPU.seats[i] ? " ·cpu" : "");
+    ctx.fillText(p.char.name + tag, x+16, y+1);
+
+    for (let k=0;k<WINS_BR;k++){                       // rounds won
+      const px = x+104+k*11;
+      ctx.beginPath(); ctx.arc(px, y+6, 3.5, 0, 7);
+      if (k < g.scores[i]){ ctx.fillStyle = col; ctx.fill(); }
+      else { ctx.strokeStyle = "rgba(255,255,255,.25)"; ctx.lineWidth = 1; ctx.stroke(); }
+    }
+    if (p.alive){
+      for (let a=0;a<p.st.ammo;a++){                   // motes in hand
+        const px = x+17+a*8;
+        ctx.beginPath(); ctx.arc(px, y+18, 2.4, 0, 7);
+        if (a < p.ammo){ ctx.fillStyle = "#e9f2ff"; ctx.fill(); }
+        else { ctx.strokeStyle = "rgba(255,255,255,.22)"; ctx.stroke(); }
+      }
+      bar(x+58, y+16, 62, 4, p.charge/CHG_FULL, p.ready ? "#ffffff" : "rgba(255,255,255,.4)");
+    }
+    ctx.globalAlpha = 1;
+  });
+  ctx.textAlign = "left";
+  ctx.font = "600 10px " + MONO;
+  ctx.fillStyle = "rgba(200,215,235,.5)";
+  ctx.fillText(standing + " STILL BURNING", 18, 14 + g.players.length*30 + 4);
+}
+
+function drawDuelHUD(g){
   for (let i=0;i<2;i++){
     const p = g.players[i], col = p.char.color;
-    const right = i === 1, x = right ? W-24 : 24;
+    const right = i === 1, x = right ? VW-24 : 24;
     ctx.textAlign = right ? "right" : "left";
 
     ctx.fillStyle = col;
@@ -1057,23 +1213,26 @@ function drawHUD(g, ui){
     ctx.fillText(p.ready ? p.char.special + " READY" : p.char.special, right ? x : x, 106);
     ctx.font = "600 12px ui-monospace,SFMono-Regular,Menlo,monospace";
   }
+}
 
+function drawCentreHUD(g, ui){
+  ctx.font = "600 12px " + MONO;
   ctx.textAlign = "center";
   ctx.fillStyle = "rgba(210,225,245,.55)";
-  ctx.fillText(g.arena.name.toUpperCase(), W/2, 16);
+  ctx.fillText(g.arena.name.toUpperCase(), VW/2, 16);
 
   const left = ROUND_TIME - g.time;
   if (left > 0){
     ctx.fillStyle = left < 10 ? "#ffb347" : "rgba(210,225,245,.4)";
-    ctx.fillText("THE DARK IN " + Math.ceil(left), W/2, 34);
+    ctx.fillText("THE DARK IN " + Math.ceil(left), VW/2, 34);
   } else {
     ctx.fillStyle = "#ff7a6b";
-    ctx.fillText("THE DARK IS CLOSING", W/2, 34);
+    ctx.fillText("THE DARK IS CLOSING", VW/2, 34);
   }
 
   if (ui.netLabel){
     ctx.fillStyle = "rgba(160,180,205,.5)";
-    ctx.fillText(ui.netLabel, W/2, H-24);
+    ctx.fillText(ui.netLabel, VW/2, VH-24);
   }
 }
 
@@ -1082,7 +1241,7 @@ function drawHUD(g, ui){
    can share one screen over the wire)
    ============================================================ */
 const SEL_COLS = 4, CARD_W = 204, CARD_H = 152, CARD_GAP = 16;
-const SEL_X = (W - (SEL_COLS*CARD_W + (SEL_COLS-1)*CARD_GAP)) / 2;
+const SEL_X = (VW - (SEL_COLS*CARD_W + (SEL_COLS-1)*CARD_GAP)) / 2;
 const SEL_Y = 132;
 
 function cardRect(i){
@@ -1092,27 +1251,31 @@ function cardRect(i){
 
 function renderSelect(sel, ui){
   ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
-  ctx.clearRect(0,0,W,H);
-  const grd = ctx.createRadialGradient(W/2, H/2, 40, W/2, H/2, W*0.8);
+  ctx.clearRect(0,0,VW,VH);
+  const grd = ctx.createRadialGradient(VW/2, VH/2, 40, VW/2, VH/2, VW*0.8);
   grd.addColorStop(0, "#101c2b"); grd.addColorStop(1, "#05080e");
-  ctx.fillStyle = grd; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = grd; ctx.fillRect(0,0,VW,VH);
 
   ctx.textBaseline = "top"; ctx.textAlign = "center";
   ctx.font = "600 11px ui-monospace,SFMono-Regular,Menlo,monospace";
   ctx.fillStyle = "rgba(200,215,235,.45)";
-  ctx.fillText("T H E   K E E P E R S   O F   T H E   C O A S T", W/2, 44);
+  ctx.fillText("T H E   K E E P E R S   O F   T H E   C O A S T", VW/2, 44);
   ctx.font = "500 13px ui-monospace,SFMono-Regular,Menlo,monospace";
   ctx.fillStyle = "rgba(200,215,235,.75)";
-  ctx.fillText("Take a mirror.  Fire locks it in, guard takes it back.", W/2, 72);
+  ctx.fillText("Take a mirror.  Fire locks it in, guard takes it back.", VW/2, 72);
 
   for (let i=0;i<CHARS.length;i++){
     const c = CHARS[i], r = cardRect(i);
-    const chosenBy = [0,1].filter(s => sel.cursor[s] === i);
+    const chosenBy = [];
+    for (let s=0;s<SEAT_COUNT;s++) if (sel.cursor[s] === i) chosenBy.push(s);
     const lockedBy = chosenBy.filter(s => sel.locked[s]);
 
-    ctx.fillStyle = lockedBy.length ? "rgba(24,38,54,.95)" : "rgba(16,26,38,.9)";
+    const hovered = i === SEL_HOVER;
+    ctx.fillStyle = lockedBy.length ? "rgba(24,38,54,.95)"
+                  : hovered ? "rgba(23,41,60,.95)" : "rgba(16,26,38,.9)";
     ctx.fillRect(r.x, r.y, r.w, r.h);
-    ctx.strokeStyle = "rgba(120,155,195,.22)"; ctx.lineWidth = 1;
+    ctx.strokeStyle = hovered ? "rgba(160,200,240,.5)" : "rgba(120,155,195,.22)";
+    ctx.lineWidth = 1;
     ctx.strokeRect(r.x+.5, r.y+.5, r.w-1, r.h-1);
 
     // the keeper's own light
@@ -1143,36 +1306,110 @@ function renderSelect(sel, ui){
     wrapText(c.specialText, r.x+14, r.y+120, r.w-28, 12, 2);
 
     // seat cursors sit just outside the card, one inset per seat
-    chosenBy.forEach(s => {
-      const p = g_picksColor(s), inset = s === 0 ? 0 : 4;
+    chosenBy.forEach((s, k) => {
+      const p = g_picksColor(s), inset = k * 4;
       ctx.strokeStyle = p; ctx.lineWidth = 2;
       ctx.globalAlpha = sel.locked[s] ? 1 : 0.55 + 0.45*Math.sin(Date.now()/160);
       ctx.strokeRect(r.x-3+inset, r.y-3+inset, r.w+6-2*inset, r.h+6-2*inset);
       ctx.globalAlpha = 1;
       ctx.fillStyle = p;
       ctx.font = "600 9px ui-monospace,SFMono-Regular,Menlo,monospace";
-      ctx.textAlign = s === 0 ? "left" : "right";
-      ctx.fillText(sel.locked[s] ? (s===0?"P1 LOCKED":"P2 LOCKED") : (s===0?"P1":"P2"),
-                   s === 0 ? r.x : r.x + r.w, r.y + r.h + 8);
+      ctx.textAlign = "left";
+      const tag = "P" + (s+1) + (sel.locked[s] ? " LOCKED" : "");
+      ctx.fillText(tag, r.x + k*52, r.y + r.h + 8);
     });
   }
 
   ctx.textAlign = "center";
   ctx.font = "500 11px ui-monospace,SFMono-Regular,Menlo,monospace";
   ctx.fillStyle = "rgba(200,215,235,.45)";
-  ctx.fillText(ui.selHint || "", W/2, H-42);
+  ctx.fillText((ui.selHint || "") + "   ·   click a keeper, click again to lock", VW/2, VH-42);
   ctx.fillStyle = "rgba(200,215,235,.3)";
-  ctx.fillText("ESC  —  back to the menu", W/2, H-24);
+  ctx.fillText("ESC  —  back to the menu", VW/2, VH-24);
 }
 
 // Seat colours on the select screen: the seat's own pick.
 let SELECT_STATE = { cursor:[0,1], locked:[false,false], lastAx:[0,0], lastAy:[0,0] };
 function g_picksColor(seat){ return CHARS[SELECT_STATE.cursor[seat]].color; }
 
+let SEL_HOVER = -1;
+function canvasPoint(e){
+  const r = cvs.getBoundingClientRect();
+  return { x:(e.clientX - r.left)/r.width*VW, y:(e.clientY - r.top)/r.height*VH };
+}
+function cardAt(pt){
+  for (let i=0;i<CHARS.length;i++){
+    const r = cardRect(i);
+    if (pt.x>=r.x && pt.x<=r.x+r.w && pt.y>=r.y && pt.y<=r.y+r.h) return i;
+  }
+  return -1;
+}
+cvs.addEventListener("mousemove", e => {
+  SEL_HOVER = state === ST.SELECT ? cardAt(canvasPoint(e)) : -1;
+});
+cvs.addEventListener("mouseleave", () => { SEL_HOVER = -1; });
+cvs.addEventListener("click", e => {
+  if (state !== ST.SELECT) return;
+  const i = cardAt(canvasPoint(e));
+  if (i < 0) return;
+  const seat = netMode === "guest" ? MY_SEAT : 0;
+  const locked = SELECT_STATE.locked[seat];
+  const next = { i, lock: !locked && SELECT_STATE.cursor[seat] === i };
+  if (netMode === "guest"){ send({ pick:{ i:next.i, lock:next.lock, unlock:locked } }); return; }
+  applyPick(seat, next.i, next.lock, locked);
+});
+function applyPick(seat, i, lock, unlock){
+  if (unlock){ SELECT_STATE.locked[seat] = false; return; }
+  SELECT_STATE.cursor[seat] = i;
+  if (lock) SELECT_STATE.locked[seat] = true;
+  if (SELECT_STATE.locked.slice(0, SEAT_COUNT).every(Boolean)) beginMatch();
+}
+
 /* ============================================================
    OVERLAY CARDS
    ============================================================ */
-function show(html){ overlay.innerHTML = `<div class="card">${html}</div>`; overlay.classList.add("on"); }
+let MENU_ITEMS = null, MENU_INDEX = 0, UI_CONFIRM = false;
+
+function show(html){
+  overlay.innerHTML = `<div class="card">${html}</div>`;
+  overlay.classList.add("on");
+  MENU_ITEMS = null;
+}
+
+function choiceList(items){
+  return `<div class="rows">` + items.map((it,i) =>
+    `<button class="row" data-i="${i}"><span class="n">${i+1}</span>
+       <span class="t">${it.label}</span><span class="h">${it.hint||""}</span></button>`).join("") + `</div>`;
+}
+
+function bindChoices(items){
+  MENU_ITEMS = items; MENU_INDEX = 0;
+  overlay.querySelectorAll(".row").forEach(el => {
+    const i = +el.dataset.i;
+    el.onclick = () => { MENU_INDEX = i; items[i].fn(); };
+    el.onmouseenter = () => { MENU_INDEX = i; paintChoices(); };
+  });
+  paintChoices();
+}
+function menuNav(){
+  if (!MENU_ITEMS) return;
+  const n = MENU_ITEMS.length;
+  if (edge.has("ArrowDown") || edge.has("KeyS")){ MENU_INDEX = (MENU_INDEX+1)%n; paintChoices(); }
+  if (edge.has("ArrowUp")   || edge.has("KeyW")){ MENU_INDEX = (MENU_INDEX-1+n)%n; paintChoices(); }
+  for (let i=0;i<n;i++)
+    if (edge.has("Digit"+(i+1)) || edge.has("Numpad"+(i+1))){ MENU_INDEX = i; MENU_ITEMS[i].fn(); return; }
+  if (edge.has("Enter") || edge.has("Space")) MENU_ITEMS[MENU_INDEX].fn();
+}
+
+function paintChoices(){
+  overlay.querySelectorAll(".row").forEach((el,i) => el.classList.toggle("on", i === MENU_INDEX));
+}
+/* Anything that says "press fire to continue" is also a button. */
+function bindGo(){
+  const b = overlay.querySelector(".go");
+  if (b) b.onclick = () => { UI_CONFIRM = true; };
+}
+const goButton = (label) => `<button class="go">${label}</button>`;
 function hide(){ overlay.classList.remove("on"); overlay.innerHTML = ""; }
 
 function menuCard(){
@@ -1180,52 +1417,130 @@ function menuCard(){
     <div class="kicker">A duel for one lamp</div>
     <h1>SALT&nbsp;LINE</h1>
     <p>The sea took the coast in a single winter. What is left is a tower, a lamp,
-       and two keepers who both know how to keep it.</p>
-    <p>Mirrors at dusk. First to ${WINS_NEEDED} rounds keeps the light.
-       ${CHARS.length} keepers to choose from, each with their own craft and one earned special.</p>
-    <div class="rule"></div>
-    <p class="hint"><b>1</b> — two players, one keyboard &nbsp;·&nbsp;
-       <b>4</b> — alone, against the tower</p>
-    <p class="hint" style="margin-top:10px"><b>2</b> — play online: you get a four-letter code
-       &nbsp;·&nbsp; <b>3</b> — join someone's code</p>
+       and the keepers who each know how to keep it.</p>
+    ${choiceList([
+      { label:"Two players, one keyboard", hint:"share a screen" },
+      { label:"Play online", hint:"get a four-letter code" },
+      { label:"Join with a code", hint:"someone sent you four letters" },
+      { label:"Alone, against the tower", hint:"one keeper, four levels" },
+      { label:"Battle royale against the tower", hint:"up to six, last lamp burning" },
+    ])}
     <div class="keys">
       <section>
-        <h3>Player one — left side</h3>
-        <dl><dt>W A S D</dt><dd>move &amp; aim</dd>
-            <dt>Space</dt><dd>fire</dd>
-            <dt>Q</dt><dd>guard / parry</dd>
-            <dt>E</dt><dd>dash</dd>
-            <dt>F</dt><dd>special</dd></dl>
+        <h3>Player one</h3>
+        <dl><dt>W A S D</dt><dd>move &amp; aim</dd><dt>Space</dt><dd>fire</dd>
+            <dt>Q</dt><dd>guard / parry</dd><dt>E</dt><dd>dash</dd><dt>F</dt><dd>special</dd></dl>
       </section>
       <section>
-        <h3>Player two — right side</h3>
-        <dl><dt>&uarr; &darr; &larr; &rarr;</dt><dd>move &amp; aim</dd>
-            <dt>. period</dt><dd>fire</dd>
-            <dt>, comma</dt><dd>guard / parry</dd>
-            <dt>/ slash</dt><dd>dash</dd>
+        <h3>Player two</h3>
+        <dl><dt>&uarr; &darr; &larr; &rarr;</dt><dd>move &amp; aim</dd><dt>. period</dt><dd>fire</dd>
+            <dt>, comma</dt><dd>guard / parry</dd><dt>/ slash</dt><dd>dash</dd>
             <dt>; semicolon</dt><dd>special</dd></dl>
       </section>
     </div>
-    <p class="hint" style="margin-top:22px">Every mote you fire arms after its first wall.
-       After that it does not care whose it was. Charge your special by parrying,
-       by keeping your motes alive off the walls, and by slipping past a live one.</p>
+    <p class="hint" style="margin-top:20px">Every mote arms after its first wall, and then it does
+       not care whose it was. Charge a special by guarding, by keeping your motes alive off the
+       walls, and by slipping past a live one.</p>
   `);
+  bindChoices([
+    { fn:() => { netMode = "local"; CPU.seats = [false,false]; SEAT_COUNT = 2; pendingSeats = 2; startSelect(); } },
+    { fn:() => hostOnline(0) },
+    { fn:() => joinCard("", "") },
+    { fn:() => { netMode = "local"; SEAT_COUNT = 2; pendingSeats = 2; state = ST.DIFF; difficultyCard(); } },
+    { fn:() => { netMode = "local"; state = ST.COUNT; royaleSetupCard(); } },
+  ]);
+}
+
+function lobbyCard(){
+  const n = SEAT_COUNT;
+  const rows = [];
+  for (let i=0;i<n;i++){
+    const who = i === 0 ? "the host" : (netMode === "guest" && i === MY_SEAT ? "you" : "joined");
+    rows.push(`<tr><td style="padding:4px 18px 4px 0;color:#e8eef7">Seat ${i+1}</td>
+                   <td style="color:#8fa3bb">${who}</td></tr>`);
+  }
+  const mode = n > 2 ? `Battle royale — ${n} keepers, last lamp burning, first to ${WINS_BR} rounds`
+                     : `The duel — two keepers, the story, first to ${WINS_NEEDED} rounds`;
+  show(`<div class="kicker">Online duel — the tower is open</div>
+    <h2>${n} in the tower</h2>
+    <table style="margin:0 0 16px;border-collapse:collapse;font:500 14px/1.6 ui-monospace,monospace">${rows.join("")}</table>
+    <p>${mode}</p>
+    ${netMode === "host" ? goButton("BEGIN") : ""}
+    <p class="hint">${netMode === "host"
+      ? `Up to ${MAX_SEATS} can join — or press <kbd>Enter</kbd>`
+      : `Waiting for the host to begin.`}</p>
+    <p class="hint">Press <kbd>Esc</kbd> to leave</p>`);
+  if (netMode === "host"){ const b = overlay.querySelector(".go"); if (b) b.onclick = () => startSelect(); }
+}
+
+function royaleCard(resultLine){
+  const standings = game.players.map((p,i) => ({p, i, w:game.scores[i]}))
+    .sort((a,b) => b.w - a.w)
+    .map(e => `<tr><td style="padding:3px 16px 3px 0;color:${e.p.char.color}">${e.p.char.name}</td>
+                   <td style="color:#8fa3bb">${e.w} round${e.w===1?"":"s"}</td></tr>`).join("");
+  show(`<div class="kicker">${resultLine || `Battle royale — ${SEAT_COUNT} keepers`}</div>
+    <h2>${resultLine ? "Standing" : "Last lamp burning"}</h2>
+    <p>Every keeper for themselves. The dark still closes, and it does not care
+       how many of you are left.</p>
+    <table style="margin:4px 0 8px;border-collapse:collapse;font:500 15px/1.7 ui-monospace,monospace">${standings}</table>
+    <p class="hint">First to ${WINS_BR} rounds takes the coast.</p>
+    <div class="rule"></div>
+    ${goButton("TAKE YOUR PLACE")}`);
+  bindGo();
+}
+
+function royaleChampionCard(w){
+  const c = game.players[w].char;
+  show(`<div class="kicker">Battle royale — ${SEAT_COUNT} keepers</div>
+    <h2 style="color:${c.color}">${c.name} holds the coast</h2>
+    <p>Every other lamp on this shore has gone out, and the tower is ${c.name}'s
+       by the only argument the coast has ever accepted.</p>
+    <p>In the years after, ${c.name} ${c.ending}</p>
+    <div class="rule"></div>
+    ${goButton("BEGIN AGAIN")}`);
+  bindGo();
+}
+
+function royaleSetupCard(){
+  show(`
+    <div class="kicker">Battle royale</div>
+    <h2>How many keepers?</h2>
+    <p>You take the first seat; the tower holds the rest. Last lamp burning takes the
+       round, and the dark closes on all of you alike.</p>
+    ${choiceList([
+      { label:"Three keepers", hint:"quick and mean" },
+      { label:"Four keepers", hint:"" },
+      { label:"Five keepers", hint:"" },
+      { label:"Six keepers", hint:"the full coast" },
+    ])}
+  `);
+  bindChoices([3,4,5,6].map(n => ({ fn:() => { pendingSeats = n; state = ST.DIFF; difficultyCard(); } })));
 }
 
 function difficultyCard(){
+  const startWith = lvl => {
+    netMode = "local"; CPU.level = lvl;
+    SEAT_COUNT = pendingSeats || 2;
+    CPU.seats = new Array(SEAT_COUNT).fill(true); CPU.seats[0] = false;
+    startSelect();
+  };
   show(`
-    <div class="kicker">Alone against the tower</div>
+    <div class="kicker">${(pendingSeats||2) > 2 ? "Battle royale" : "Alone against the tower"}</div>
     <h2>Who is holding the other mirror?</h2>
-    <p>It plays with the same keyboard you do — eight directions, one fire, one guard,
-       one dash, one special — and it reads only what is drawn on the screen.</p>
-    <p>It is also deterministic. The same position is answered the same way twice,
-       so it can be learned, and then beaten.</p>
-    <div class="rule"></div>
-    <p class="hint"><b>1</b> — Apprentice &nbsp;·&nbsp; slow to see it coming, rarely guards</p>
-    <p class="hint" style="margin-top:8px"><b>2</b> — Keeper &nbsp;·&nbsp; banks one wall, guards about half of what it should</p>
-    <p class="hint" style="margin-top:8px"><b>3</b> — Warden &nbsp;·&nbsp; banks two walls, guards almost everything, never hesitates</p>
-    <p class="hint" style="margin-top:22px">Press <kbd>Esc</kbd> to go back</p>
+    <p>The first three levels are held to what you get: the same keys, the same eight
+       directions a keyboard can make, and only what is drawn on the screen. They are
+       deterministic, so they can be learned and then beaten.</p>
+    ${choiceList([
+      { label:"Apprentice", hint:"slow to see it coming, rarely guards" },
+      { label:"Keeper", hint:"banks one wall, guards about half" },
+      { label:"Warden", hint:"banks two walls, guards nearly everything" },
+      { label:"Two Lights", hint:"stops pretending — aims where no keyboard can" },
+    ])}
+    <p class="hint" style="margin-top:18px">Two Lights is the exception, and it is meant to be:
+       it reacts every frame, aims continuously instead of in eight directions, and does not
+       mistime a guard. It is not built to be fair.</p>
   `);
+  bindChoices([0,1,2,3].map(l => ({ fn:() => startWith(l) })));
 }
 
 function beatCard(i, resultLine, names){
@@ -1238,8 +1553,10 @@ function beatCard(i, resultLine, names){
     <p class="speaker">From the log of ${who.name}, ${who.title.toLowerCase()}</p>
     ${b.lines.map(l => `<p>${l}</p>`).join("")}
     <div class="rule"></div>
-    <p class="hint blink">Press <b>fire</b> to take your place — <kbd>Space</kbd>${netMode==="local"?` or <kbd>.</kbd>`:``}</p>
+    ${goButton("TAKE YOUR PLACE")}
+    <p class="hint">or press <kbd>Space</kbd>${netMode==="local"?` / <kbd>.</kbd>`:``}</p>
   `);
+  bindGo();
 }
 
 function epilogueCard(winner, scores, names){
@@ -1257,8 +1574,9 @@ function epilogueCard(winner, scores, names){
     <p>By morning there is a single light burning on eighty miles of drowned coast.
        There was only ever supposed to be one.</p>
     <div class="rule"></div>
-    <p class="hint blink">Press <b>fire</b> to begin again</p>
+    ${goButton("BEGIN AGAIN")}
   `);
+  bindGo();
 }
 
 /* ============================================================
@@ -1280,10 +1598,11 @@ function epilogueCard(winner, scores, names){
 let netMode = "local";                 // "local" | "host" | "guest"
 let netNote = "";
 let pc = null, ch = null;              // paste-code path
-let peer = null, conn = null;          // join-code path
+let peer = null, conn = null;          // join-code path (guest side)
+let conns = [];                        // join-code path (host side), one per guest
 let localSeq  = { f:0, p:0, d:0, s:0, c:0 };
-let remoteSeq = { f:0, p:0, d:0, s:0, c:0 };
-let remotePkt = { a:[0,0], f:0, p:0, d:0, s:0, c:0 };
+const remoteSeqs = {};                 // per seat
+const remotePkts = {};                 // per seat
 let lastUiKey = "";
 
 /* Public STUN, plus a public TURN relay for the networks that refuse to
@@ -1336,14 +1655,20 @@ const LINK = { open:false, send(){}, close(){} };
 function linkUp(sendFn, closeFn){
   LINK.open = true; LINK.send = sendFn; LINK.close = closeFn;
   netNote = "";
-  if (netMode === "host") startSelect();
+  if (netMode === "host"){ SEAT_COUNT = 2; startSelect(); }
   else show(`<div class="kicker">Connected</div><h2>Waiting for the host</h2>
              <p>Choosing keepers begins in a moment.</p>`);
 }
-function linkData(msg){
+function linkData(msg, seat){
   if (!msg) return;
-  if (netMode === "host" && msg.i) remotePkt = msg.i;
-  else if (netMode === "guest" && msg.s) guestApply(msg.s, msg.u);
+  if (netMode === "host"){
+    if (msg.i) remotePkts[seat || 1] = msg.i;
+    else if (msg.pick && state === ST.SELECT)
+      applyPick(seat || 1, msg.pick.i, msg.pick.lock, msg.pick.unlock);
+    return;
+  }
+  if (msg.hello){ MY_SEAT = msg.hello.seat; SEAT_COUNT = msg.hello.n; lobbyCard(); return; }
+  if (msg.s) guestApply(msg.s, msg.u);
 }
 function linkDown(){
   if (!LINK.open) return;
@@ -1351,7 +1676,15 @@ function linkDown(){
   netNote = "the other keeper disconnected";
   toMenu();
 }
-function send(o){ if (LINK.open){ try { LINK.send(o); } catch {} } }
+function send(o){
+  if (netMode === "host"){
+    if (conns.length){ for (const e of conns){ try { e.conn.send(o); } catch {} } }
+    else if (LINK.open){ try { LINK.send(o); } catch {} }   // paste-code host: one guest
+    return;
+  }
+  if (LINK.open){ try { LINK.send(o); } catch {} }
+}
+function sendTo(entry, o){ try { entry.conn.send(o); } catch {} }
 
 /* ---------- join codes ---------- */
 const CODE_CHARS = "ACDEFGHJKMNPQRTUVWXY34679";   // no O/0, no I/1/L
@@ -1366,12 +1699,53 @@ function shareLink(code){
   return location.origin + location.pathname + "#" + code;
 }
 
-function wirePeerConn(c){
+function wirePeerConn(c){            // guest side: one connection, to the host
   conn = c;
   c.on("open",  () => linkUp(o => c.send(o), () => c.close()));
   c.on("data",  msg => linkData(msg));
   c.on("close", () => linkDown());
   c.on("error", () => linkDown());
+}
+
+function hostAccept(c){             // host side: one of these per guest
+  if (state !== ST.NET && state !== ST.LOBBY){ try { c.close(); } catch {} return; }
+  const entry = { conn:c, seat:0 };
+  c.on("open", () => {
+    if (conns.length + 1 >= MAX_SEATS){ try { c.close(); } catch {} return; }
+    conns.push(entry);
+    reseatLobby();
+    LINK.open = true;
+    state = ST.LOBBY;
+    lobbyCard();
+  });
+  c.on("data",  msg => linkData(msg, entry.seat));
+  c.on("close", () => hostDrop(entry));
+  c.on("error", () => hostDrop(entry));
+}
+
+/* Seats are handed out in join order and only renumbered in the lobby, so a
+   keeper's seat cannot shift under them once a match has started. */
+function reseatLobby(){
+  conns.forEach((e,i) => { e.seat = i + 1; });
+  SEAT_COUNT = conns.length + 1;
+  conns.forEach(e => sendTo(e, { hello:{ seat:e.seat, n:SEAT_COUNT } }));
+}
+
+function hostDrop(entry){
+  const i = conns.indexOf(entry);
+  if (i < 0) return;
+  conns.splice(i, 1);
+  if (state === ST.LOBBY || state === ST.NET){
+    reseatLobby();
+    if (state === ST.LOBBY) lobbyCard();
+    return;
+  }
+  const p = game.players[entry.seat];            // mid-match: their lamp goes out
+  if (p && p.alive){
+    p.alive = false;
+    game.burst(p.x, p.y, p.char.color, 30, 200);
+  }
+  if (!conns.length){ netNote = "the other keepers disconnected"; toMenu(); }
 }
 
 function hostOnline(attempt){
@@ -1383,7 +1757,7 @@ function hostOnline(attempt){
     const code = makeCode();
     peer = new Peer(PEER_PREFIX + code, brokerOptions());
     peer.on("open", () => { if (netMode === "host") hostCodeCard(code); });
-    peer.on("connection", c => { if (netMode === "host") wirePeerConn(c); });
+    peer.on("connection", c => { if (netMode === "host") hostAccept(c); });
     peer.on("error", err => {
       if (netMode !== "host") return;
       if (err && err.type === "unavailable-id" && (attempt||0) < 5){
@@ -1594,24 +1968,31 @@ const dec = s => JSON.parse(new TextDecoder().decode(
 
 function netTeardown(){
   LINK.open = false; LINK.send = () => {}; LINK.close = () => {};
+  for (const e of conns){ try { e.conn.close(); } catch {} }
+  conns = [];
+  for (const k of Object.keys(remoteSeqs)) delete remoteSeqs[k];
+  for (const k of Object.keys(remotePkts)) delete remotePkts[k];
+  SEAT_COUNT = 2; MY_SEAT = 0;
   try { conn && conn.close(); } catch {}
   try { peer && peer.destroy(); } catch {}
   try { ch && ch.close(); } catch {}
   try { pc && pc.close(); } catch {}
   conn = peer = ch = pc = null;
   netMode = "local";
-  localSeq = {f:0,p:0,d:0,s:0,c:0}; remoteSeq = {f:0,p:0,d:0,s:0,c:0};
-  remotePkt = { a:[0,0], f:0, p:0, d:0, s:0, c:0 };
+  localSeq = {f:0,p:0,d:0,s:0,c:0};
 }
 
 /* host: turn the guest's packet into one frame of input.
    Presses arrive as counters, so a dropped packet never eats a shot. */
-function remoteInput(){
+function remoteInput(seat){
+  seat = seat || 1;
+  const pkt = remotePkts[seat] || (remotePkts[seat] = { a:[0,0], f:0, p:0, d:0, s:0, c:0 });
+  const seen = remoteSeqs[seat] || (remoteSeqs[seat] = { f:0, p:0, d:0, s:0, c:0 });
   const i = blankInput();
-  i.ax = remotePkt.a[0]; i.ay = remotePkt.a[1];
+  i.ax = pkt.a[0]; i.ay = pkt.a[1];
   for (const k of ["f","p","d","s","c"]){
-    if (remotePkt[k] > remoteSeq[k]){
-      remoteSeq[k]++;
+    if (pkt[k] > seen[k]){
+      seen[k]++;
       if (k==="f") i.fire = true;
       else if (k==="p"){ i.parry = true; i.back = true; }
       else if (k==="d") i.dash = true;
@@ -1654,8 +2035,10 @@ function guestApply(s, u){
   if (key !== lastUiKey){
     lastUiKey = key;
     state = u.st;
-    if (u.st === ST.CARD) beatCard(u.i, u.r, seatNames());
-    else if (u.st === ST.EPI) epilogueCard(u.w, game.scores, seatNames());
+    if (u.st === ST.CARD) isBR() ? royaleCard(u.r) : beatCard(u.i, u.r, seatNames());
+    else if (u.st === ST.EPI) isBR() ? royaleChampionCard(u.w)
+                                     : epilogueCard(u.w, game.scores, seatNames());
+    else if (u.st === ST.LOBBY) lobbyCard();
     else if (u.st === ST.PLAY || u.st === ST.SELECT) hide();
     else if (u.st === ST.MENU) menuCard();
   }
@@ -1673,20 +2056,35 @@ function guestApply(s, u){
    ============================================================ */
 const CPU_LEVELS = [
   { id:"APPRENTICE", think:0.30, bounces:0, parryOdds:0.20, dashOdds:0.30,
-    specialOdds:0.35, lead:0.0,  hesitate:0.40, keepAt:270, blindFire:0.34 },
+    specialOdds:0.35, lead:0.0,  hesitate:0.40, keepAt:270, blindFire:0.34, lineUp:0.35 },
   { id:"KEEPER",     think:0.17, bounces:1, parryOdds:0.60, dashOdds:0.70,
-    specialOdds:0.80, lead:0.55, hesitate:0.18, keepAt:285, blindFire:0.07 },
+    specialOdds:0.80, lead:0.55, hesitate:0.18, keepAt:285, blindFire:0.07, lineUp:1.1 },
   { id:"WARDEN",     think:0.085,bounces:2, parryOdds:0.93, dashOdds:0.95,
-    specialOdds:1.00, lead:1.0,  hesitate:0.0,  keepAt:260, blindFire:0.0 },
+    specialOdds:1.00, lead:1.0,  hesitate:0.0,  keepAt:260, blindFire:0.0, lineUp:1.8 },
+  // Reacts every frame, banks three walls, guards everything it can reach, and
+  // will not stand anywhere a shot could already be on its way.
+  { id:"TWO LIGHTS", think:1/60, bounces:3, parryOdds:1.00, dashOdds:1.00,
+    specialOdds:1.00, lead:1.0,  hesitate:0.0,  keepAt:210, blindFire:0.0, lineUp:2.8,
+    fineAim:true, sharpGuard:true, parryWindow:0.45 },
 ];
 
-const CPU = { seats:[false,false], level:1, mem:[null,null], selT:0 };
+const CPU = { seats:[false,false], level:1, mem:[null,null], selT:[] };
 
 const DIRS8 = (() => {
   const out = [];
   for (let i=0;i<8;i++){ const a = i*Math.PI/4; out.push([Math.cos(a), Math.sin(a)]); }
   return out;
 })();
+
+/* Levels one to three are held to eight directions, because that is all a
+   keyboard can make. The fourth is not: it aims continuously, which no player
+   can do, and the difficulty card says so plainly. */
+const DIRS_FINE = (() => {
+  const out = [];
+  for (let i=0;i<72;i++){ const a = i*Math.PI/36; out.push([Math.cos(a), Math.sin(a)]); }
+  return out;
+})();
+const cpuDirs = lvl => lvl.fineAim ? DIRS_FINE : DIRS8;
 
 // Deterministic stand-in for a coin flip: the same situation always answers alike.
 function hash01(x, y){
@@ -1727,8 +2125,9 @@ function cpuClearLine(g, from, to){
 }
 
 /* Which motes would hit me if I stood perfectly still, and when. */
-function cpuThreats(g, p){
-  const list = [], step = 1/40, horizon = 1.1;
+function cpuThreats(g, p, horizon){
+  const list = [], step = 1/40;
+  horizon = horizon || 1.4;
   for (const mo of g.motes){
     if (!mo.armed && mo.owner === p.idx) continue;       // inert in my own hands
     let x = mo.x, y = mo.y, vx = mo.vx, vy = mo.vy, t = 0;
@@ -1757,9 +2156,9 @@ function cpuThreats(g, p){
 /* Is there a direction that puts a mote into them? Bank shots allowed
    by level. A line that comes back and kills me does not count. */
 function cpuFindShot(g, p, foe, lvl){
-  const st = p.st, step = 1/40, horizon = 1.5;
+  const st = p.st, step = 1/40, horizon = lvl.fineAim ? 3.6 : 2.8;
   let best = null;
-  for (const [dx,dy] of DIRS8){
+  for (const [dx,dy] of cpuDirs(lvl)){
     const off = st.radius + st.moteRadius + 2, r = st.moteRadius;
     let x = p.x + dx*off, y = p.y + dy*off;
     let vx = dx*st.moteSpeed, vy = dy*st.moteSpeed;
@@ -1798,10 +2197,15 @@ function cpuFindShot(g, p, foe, lvl){
 
 /* Face the incoming mote, but angled as far toward the sender as the
    guard arc allows — a parry returns along your facing. */
-function cpuParryFace(p, foe, threat){
+function cpuParryFace(p, foe, threat, lvl){
   const toMote = Math.atan2(threat.mote.y - p.y, threat.mote.x - p.x);
   const toFoe  = Math.atan2(foe.y - p.y, foe.x - p.x);
   const limit  = p.st.parryArc/2 - 0.10;
+  if (lvl && lvl.fineAim){          // point it exactly back down their throat
+    let d = Math.atan2(Math.sin(toFoe-toMote), Math.cos(toFoe-toMote));
+    const a = toMote + clamp(d, -limit, limit);
+    return [Math.cos(a), Math.sin(a)];
+  }
   let best = null;
   for (const [dx,dy] of DIRS8){
     const a  = Math.atan2(dy,dx);
@@ -1835,8 +2239,28 @@ function cpuEscape(g, p, threats){
   return best ? best.dir : [0,0];
 }
 
+/* Aim is welded to movement and a keyboard only makes eight of them, so a
+   shot exists only from the lines that run through the other keeper. This
+   finds the nearest such line and says which way to step onto it — the
+   lining-up that a player does without thinking about it. */
+function cpuAimLine(g, p, foe, lvl){
+  let best = null;
+  for (const [dx,dy] of (lvl && lvl.fineAim ? DIRS_FINE : DIRS8)){
+    const vx = p.x - foe.x, vy = p.y - foe.y;
+    const along = vx*dx + vy*dy;
+    if (along > -70) continue;                 // must sit back along the line, not past them
+    const perpX = vx - along*dx, perpY = vy - along*dy;
+    const perp = len(perpX, perpY);
+    if (perp > 520) continue;
+    if (!best || perp < best.perp) best = { perp, px:perpX, py:perpY, dir:[dx,dy] };
+  }
+  if (!best || best.perp < 1) return null;
+  return { ux:-best.px/best.perp, uy:-best.py/best.perp, perp:best.perp };
+}
+
 function cpuRoam(g, p, foe, threats, lvl){
   const b = g.bounds();
+  const aim = cpuAimLine(g, p, foe, lvl);
   const circle = Math.atan2(foe.y-p.y, foe.x-p.x)
                + (Math.floor(g.time/1.7) % 2 ? 1 : -1) * Math.PI/2;
   let best = null;
@@ -1850,8 +2274,16 @@ function cpuRoam(g, p, foe, threats, lvl){
       score -= Math.max(0, 95 - len(px-mo.x, py-mo.y)) * 0.06;
     }
     score += Math.min(px-b.x, b.x+b.w-px, py-b.y, b.y+b.h-py) * 0.03;
-    score += (dx*Math.cos(circle) + dy*Math.sin(circle)) * 1.1;
+    score += (dx*Math.cos(circle) + dy*Math.sin(circle)) * 0.5;
     score += (dx*p.fx + dy*p.fy) * 0.04;
+    if (aim) score += (dx*aim.ux + dy*aim.uy) * (lvl.lineUp || 1.0);
+    if (lvl.wary){
+      // stand nowhere a keeper already has a clean line to you
+      for (const q of g.players){
+        if (q.idx === p.idx || !q.alive) continue;
+        if (cpuClearLine(g, q, {x:px, y:py})) score -= 2.6;
+      }
+    }
     if (!best || score > best.score) best = { dir:[dx,dy], score };
   }
   return best ? best.dir : [0,0];
@@ -1883,12 +2315,23 @@ function cpuFace(p, target){
 }
 
 /* The deliberate part: runs on the level's reaction clock, not every frame. */
-function cpuPlan(g, seat, lvl, m){
-  const p = g.players[seat], foe = g.players[1-seat];
-  m.parryTarget = 0;
-  if (!p.alive || !foe.alive || g.result){ m.dir = [0,0]; return; }
+function cpuFoe(g, seat){
+  const me = g.players[seat];
+  let best = null, bd = 1e9;
+  for (const q of g.players){
+    if (q.idx === seat || !q.alive) continue;
+    const d = len(q.x-me.x, q.y-me.y);
+    if (d < bd){ bd = d; best = q; }
+  }
+  return best;
+}
 
-  const threats = cpuThreats(g, p);
+function cpuPlan(g, seat, lvl, m){
+  const p = g.players[seat], foe = cpuFoe(g, seat);
+  m.parryTarget = 0;
+  if (!p.alive || !foe || g.result){ m.dir = [0,0]; return; }
+
+  const threats = cpuThreats(g, p, lvl.fineAim ? 1.9 : 1.4);
   const worst = threats[0];
   const shot = (p.fireCd <= 0 && p.ammo > 0) ? cpuFindShot(g, p, foe, lvl) : null;
   const wantSpecial = cpuSpecialWanted(g, p, foe, lvl, worst, shot);
@@ -1908,10 +2351,10 @@ function cpuPlan(g, seat, lvl, m){
   }
 
   // Commit to a parry — the press itself is timed frame by frame below.
-  if (worst && worst.t < 0.55 && p.parryCd <= 0 && p.ghost <= 0 &&
+  if (worst && worst.t < (lvl.parryWindow || 0.55) && p.parryCd <= 0 && p.ghost <= 0 &&
       cpuDraw(p, worst.id*17, 11) < lvl.parryOdds){
     m.parryTarget = worst.id;
-    m.dir = cpuParryFace(p, foe, worst);
+    m.dir = cpuParryFace(p, foe, worst, lvl);
     return;
   }
 
@@ -1961,7 +2404,8 @@ function cpuInput(g, seat, dt){
     else {
       const d = len(mo.x - p.x, mo.y - p.y);
       const closing = d / (len(mo.vx, mo.vy) || 1);
-      if (closing <= 0.055 || d <= p.st.parryReach*0.8){ i.parry = true; m.parryTarget = 0; }
+      const window = lvl.sharpGuard ? 0.035 : 0.055;
+      if (closing <= window || d <= p.st.parryReach*0.8){ i.parry = true; m.parryTarget = 0; }
     }
   }
   return i;
@@ -1973,14 +2417,13 @@ const CPU_COUNTER = { ines:"keel", cato:"auger", meran:"odall", odall:"silt",
 
 function cpuSelectInput(seat){
   const i = blankInput();
-  const human = 1 - seat;
-  if (!SELECT_STATE.locked[human]) return i;         // let them commit first
+  if (!SELECT_STATE.locked[0]) return i;             // let the player commit first
   const now = performance.now();
-  if (now < CPU.selT) return i;
-  CPU.selT = now + 240;                              // a step every 240ms, so it can be watched
+  if (now < (CPU.selT[seat] || 0)) return i;         // each keeper has its own clock, so
+  CPU.selT[seat] = now + 240;                        // they choose at the same time
 
   const target = Math.max(0, CHARS.findIndex(c =>
-    c.id === CPU_COUNTER[CHARS[SELECT_STATE.cursor[human]].id]));
+    c.id === CPU_COUNTER[CHARS[SELECT_STATE.cursor[0]].id]) + (seat - 1)) % CHARS.length;
   const cur = SELECT_STATE.cursor[seat];
   if (cur === target){ i.fire = true; return i; }
 
@@ -1993,10 +2436,10 @@ function cpuSelectInput(seat){
 /* ============================================================
    STATE MACHINE
    ============================================================ */
-const ST = { MENU:0, NET:1, SELECT:2, CARD:3, PLAY:4, EPI:5, DIFF:6 };
+const ST = { MENU:0, NET:1, SELECT:2, CARD:3, PLAY:4, EPI:5, DIFF:6, COUNT:7, LOBBY:8 };
 let state = ST.MENU;
 let game = new Game();
-let cardIdx = 0, resultLine = "", epiWinner = 0;
+let cardIdx = 0, resultLine = "", epiWinner = 0, pendingSeats = 2;
 
 function seatNames(){ return game.players.map(p => p.char); }
 
@@ -2007,7 +2450,7 @@ function uiPacket(){
 
 function toMenu(){
   state = ST.MENU; lastUiKey = "";
-  CPU.seats = [false,false]; CPU.mem = [null,null];
+  CPU.seats = [false,false]; CPU.mem = []; SEAT_COUNT = 2; pendingSeats = 2;
   game = new Game();
   netTeardown();
   menuCard();
@@ -2015,13 +2458,16 @@ function toMenu(){
 }
 
 function startSelect(){
-  SELECT_STATE = { cursor:[0,1], locked:[false,false], lastAx:[0,0], lastAy:[0,0] };
+  SELECT_STATE = { cursor:DEFAULT_PICKS.slice(0, SEAT_COUNT),
+                   locked:new Array(SEAT_COUNT).fill(false),
+                   lastAx:new Array(SEAT_COUNT).fill(0),
+                   lastAy:new Array(SEAT_COUNT).fill(0) };
   state = ST.SELECT;
   hide();
 }
 
 function stepSelect(inputs){
-  for (let s=0;s<2;s++){
+  for (let s=0;s<SEAT_COUNT;s++){
     const inp = inputs[s];
     if (SELECT_STATE.locked[s]){
       if (inp.back) SELECT_STATE.locked[s] = false;     // guard takes your pick back
@@ -2043,40 +2489,47 @@ function stepSelect(inputs){
     SELECT_STATE.lastAx[s] = ax; SELECT_STATE.lastAy[s] = ay;
     if (inp.fire) SELECT_STATE.locked[s] = true;
   }
-  if (SELECT_STATE.locked[0] && SELECT_STATE.locked[1]) beginStory();
+  if (SELECT_STATE.locked.slice(0, SEAT_COUNT).every(Boolean)) beginMatch();
 }
 
-function beginStory(){
-  game = new Game(SELECT_STATE.cursor.slice());
+function beginMatch(){
+  game = new Game(SELECT_STATE.cursor.slice(0, SEAT_COUNT));
   cardIdx = 0; resultLine = "";
   state = ST.CARD;
-  beatCard(0, "", seatNames());
+  if (isBR()) royaleCard(""); else beatCard(0, "", seatNames());
 }
 
 function beginRound(){
   game.loadRound(cardIdx);
+  camReset(game);
   state = ST.PLAY;
   hide();
 }
 
 function endOfRound(){
   const w = game.result.winner;
-  if (w === -1){                                   // both lamps out: nobody profits
+  const need = isBR() ? WINS_BR : WINS_NEEDED;
+  if (w === -1){                                   // every lamp out: nobody profits
     resultLine = "Simultaneous — the round is void";
     beginRound();
     return;
   }
-  if (game.scores[w] >= WINS_NEEDED){
+  if (game.scores[w] >= need){
     epiWinner = w; state = ST.EPI;
-    epilogueCard(w, game.scores, seatNames());
+    if (isBR()) royaleChampionCard(w); else epilogueCard(w, game.scores, seatNames());
     return;
   }
   cardIdx++;
-  resultLine = `${game.players[w].char.name} takes the round, ` +
-               `${ROUND_FLAVOR[Math.min(cardIdx-1, ROUND_FLAVOR.length-1)]}` +
-               ` — ${game.scores[0]}–${game.scores[1]}`;
   state = ST.CARD;
-  beatCard(cardIdx, resultLine, seatNames());
+  if (isBR()){
+    resultLine = `${game.players[w].char.name} is the last lamp burning`;
+    royaleCard(resultLine);
+  } else {
+    resultLine = `${game.players[w].char.name} takes the round, ` +
+                 `${ROUND_FLAVOR[Math.min(cardIdx-1, ROUND_FLAVOR.length-1)]}` +
+                 ` — ${game.scores[0]}–${game.scores[1]}`;
+    beatCard(cardIdx, resultLine, seatNames());
+  }
 }
 
 /* ============================================================
@@ -2094,38 +2547,42 @@ function tick(now){
   if (netMode === "guest"){
     guestSend();
     game.stepSparks(dt);
-    if (state === ST.PLAY) render(game, { netLabel:"ONLINE — you hold the right seat" });
-    else if (state === ST.SELECT) renderSelect(SELECT_STATE, { selHint:"the host takes the left seat" });
+    if (state === ST.PLAY){ updateCamera(game, dt);
+      render(game, { netLabel:"ONLINE — you are seat " + (MY_SEAT+1) }); }
+    else if (state === ST.SELECT)
+      renderSelect(SELECT_STATE, { selHint:"you are seat " + (MY_SEAT+1) + " — everyone picks their own" });
     edge.clear();
     return;
   }
 
-  const seatInputs = () => {
-    if (netMode === "host") return [readInput(0), remoteInput()];
-    return [0,1].map(s => CPU.seats[s] ? cpuInput(game, s, dt) : readInput(s));
+  const gather = select => {
+    const out = [];
+    for (let s=0; s<SEAT_COUNT; s++){
+      if (netMode === "host" && s > 0) out.push(remoteInput(s));
+      else if (CPU.seats[s]) out.push(select ? cpuSelectInput(s) : cpuInput(game, s, dt));
+      else if (s <= 1) out.push(readInput(s));
+      else out.push(blankInput());
+    }
+    return out;
   };
+  const seatInputs = () => gather(false);
 
   switch (state){
     case ST.MENU:
-      if (edge.has("Digit1") || edge.has("Numpad1")){ netMode = "local"; CPU.seats = [false,false]; startSelect(); }
-      else if (edge.has("Digit2") || edge.has("Numpad2")) hostOnline(0);
-      else if (edge.has("Digit3") || edge.has("Numpad3")) joinCard("", "");
-      else if (edge.has("Digit4") || edge.has("Numpad4")){ state = ST.DIFF; difficultyCard(); }
+    case ST.COUNT:
+    case ST.DIFF:
+      menuNav();
       break;
 
-    case ST.DIFF: {
-      const pick = ["Digit1","Digit2","Digit3"].findIndex(k => edge.has(k));
-      if (pick >= 0){ netMode = "local"; CPU.level = pick; CPU.seats = [false,true]; startSelect(); }
+    case ST.LOBBY:
+      if (netMode === "host" && (edge.has("Enter") || edge.has("Space"))) startSelect();
       break;
-    }
 
     case ST.NET:
       break;
 
     case ST.SELECT: {
-      stepSelect([0,1].map(s =>
-        CPU.seats[s] ? cpuSelectInput(s)
-        : (netMode === "host" && s === 1) ? remoteInput() : readInput(s)));
+      stepSelect(gather(true));
       if (state === ST.SELECT)
         renderSelect(SELECT_STATE, { selHint: netMode === "host"
           ? "you hold the left seat — they choose for themselves"
@@ -2152,6 +2609,7 @@ function tick(now){
           first = false;
         }
       }
+      updateCamera(game, dt);
       render(game, { netLabel: netMode === "host" ? "ONLINE — you hold the left seat" : "" });
       if (game.result && game.overTimer > 1.8) endOfRound();
       break;

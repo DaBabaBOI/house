@@ -1,7 +1,8 @@
 # Salt Line
 
-A two-player duel that runs entirely in one HTML file: `saltline.html`.
-No build step, no server, no dependencies. Open it, or host it anywhere static.
+A duel for two to six keepers, running entirely in one HTML file:
+`saltline.html`. No build step, no server, no dependencies. Open it, or host it
+anywhere static.
 
 ## The idea
 
@@ -9,7 +10,14 @@ Two keepers hold the last lighthouse on a drowned coast. The tower holds one of
 them, so they settle it the old way — signal mirrors, at dusk. Between rounds you
 read their logs, and it becomes clear the duel was never about the tower.
 
-Best of five; first to three rounds keeps the light.
+Best of five; first to three rounds keeps the light. With three or more keepers
+it becomes a battle royale instead: last lamp burning, first to two rounds.
+
+## The coast
+
+The world is 1920 × 1200 — four times what fits on screen at once. The camera
+follows the living keepers and pulls back as they spread out, so a duel plays
+close and a six-way royale plays wide. Nobody is ever off-screen.
 
 ## Why it is skill, not luck
 
@@ -32,6 +40,8 @@ nothing that decides a round. Everything below is a decision:
   fizzles, so a wild volley leaves you empty and readable.
 - **No stalling.** After 45 seconds the dark closes in a ring at a time, and it
   does not stop closing. Whoever is worst placed is caught first.
+- **Nothing is off-screen.** The camera holds every living keeper in frame, so
+  you are never killed by something the view was hiding.
 - **Symmetric arenas.** Every layout is identical under a 180° rotation, so
   neither side inherits an advantage from the geometry.
 
@@ -74,6 +84,16 @@ earns exactly nothing, and so does running and dashing. It fills only from:
 
 `Esc` returns to the menu. Online, both players use the left-hand set.
 
+## Battle royale
+
+Three to six keepers, every one for themselves, last lamp burning takes the
+round, first to two rounds takes the coast. Online it starts by itself: two in
+the tower play the story duel, three or more play royale. Against the tower it
+is menu option 5.
+
+Everyone spawns on a ring around the middle, evenly spaced, so no seat starts
+better placed than another. Eliminated keepers leave their motes in the air.
+
 ## Playing alone
 
 Menu option `4`. The CPU is not given anything you are not:
@@ -91,19 +111,34 @@ Difficulty is a capability, not a handicap dial. Each level differs in reaction
 time, how many walls it will bank a shot off, how often it commits to a guard,
 and whether it fires without a solution:
 
-| | Reaction | Banks | Guards | Fires blind |
+| | Reaction | Banks | Guards | Aim |
 |---|---|---|---|---|
-| **Apprentice** | 0.30s | direct shots only | rarely | often — and hits itself doing it |
-| **Keeper** | 0.17s | one wall | about half | occasionally |
-| **Warden** | 0.085s | two walls | almost always | never |
+| **Apprentice** | 0.30s | direct shots only | rarely | eight directions — fires blind, and hits itself doing it |
+| **Keeper** | 0.17s | one wall | about half | eight directions |
+| **Warden** | 0.085s | two walls | almost always | eight directions |
+| **Two Lights** | every frame | three walls | everything it can reach | **continuous — no keyboard can do this** |
 
-Measured over 240 CPU-vs-CPU rounds per matchup, seat orders balanced: Warden
-takes 78% of decided rounds against Apprentice, 77% against Keeper, and Keeper
-takes 75% against Apprentice. Across 1,200 mirror rounds from varied but
-symmetric starts, neither seat is favoured (53.1%, inside the fair band).
+The first three are held to what a player gets. **Two Lights is not**, and the
+difficulty card says so: it aims in any direction rather than the eight a
+keyboard makes, reacts every frame, and does not mistime a guard. It is not
+built to be fair.
+
+It is also not unbeatable, and it would be dishonest to claim otherwise — it
+takes only about 59% of decided rounds against Warden, because two keepers who
+both guard well mostly trade. Against anything human-paced it is another story.
+
+Measured over 80 rounds per matchup with seat orders balanced; across 1,200
+mirror rounds from varied but symmetric starts, neither seat is favoured
+(53.1%, inside the fair band).
 
 On the select screen the CPU waits for your pick, then answers it with a
 counter of its own.
+
+## Getting around
+
+Every menu is a list you can click, hover or drive with the arrow keys, Enter,
+or the number beside each row. On the keeper select, click a card to take it and
+click again to lock it in; guard takes it back.
 
 ## Online play
 
