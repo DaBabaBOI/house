@@ -107,16 +107,23 @@ counter of its own.
 
 ## Online play
 
-Menu option `2` hosts, option `3` joins. Because there is no backend, the two
-browsers introduce themselves by copy-paste: the host generates an invitation
-code, the guest pastes it and generates a reply code, the host pastes that back.
-After that the browsers talk to each other directly over WebRTC.
+Menu option `2` opens a tower and gives you a **four-letter code** plus a link.
+The other player presses `3` and types the code, or just opens the link — it
+drops them straight in. Nothing else to copy, nothing to send back.
 
-The host owns the simulation. The guest sends only its input — as counters rather
-than one-shot events, so a dropped packet never eats a shot or a special — and
-draws the state it is sent. Character select runs on the same channel, so both
-players see each other's cursor move before anything is locked in.
+A small public broker introduces the two browsers to each other. After that the
+game data goes directly between you and never touches it. If the broker is
+blocked on your network, the game says so and offers the old **paste-code**
+route, which needs no broker at all: the host sends one code, the guest sends
+one back, and you are connected.
 
-Peer-to-peer connections traverse most home networks via STUN. Some strict
-corporate or carrier-grade NATs need a TURN relay, which a static page has no way
-to provide; on those networks, play locally.
+The host owns the simulation. The guest sends only its input — as counters
+rather than one-shot events, so a dropped packet never eats a shot or a special
+— and draws the state it is sent. Character select runs on the same channel, so
+both players see each other's cursor move before anything is locked in.
+
+Connections go direct where the network allows it, and fall back to a public
+TURN relay for the strict company and mobile-carrier networks that refuse direct
+routes. Both the broker and the relay are free public services, so neither is
+guaranteed to be up; when they are not, paste codes still work, and a
+self-hosted PeerServer can be pointed at with `?broker=host:port`.

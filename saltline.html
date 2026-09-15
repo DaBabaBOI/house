@@ -1185,9 +1185,9 @@ function menuCard(){
        ${CHARS.length} keepers to choose from, each with their own craft and one earned special.</p>
     <div class="rule"></div>
     <p class="hint"><b>1</b> — two players, one keyboard &nbsp;·&nbsp;
-       <b>2</b> — host an online duel &nbsp;·&nbsp;
-       <b>3</b> — join with a code &nbsp;·&nbsp;
        <b>4</b> — alone, against the tower</p>
+    <p class="hint" style="margin-top:10px"><b>2</b> — play online: you get a four-letter code
+       &nbsp;·&nbsp; <b>3</b> — join someone's code</p>
     <div class="keys">
       <section>
         <h3>Player one — left side</h3>
@@ -1262,25 +1262,231 @@ function epilogueCard(winner, scores, names){
 }
 
 /* ============================================================
-   NETWORK  —  serverless WebRTC. One player hosts and owns the
-   simulation; the other sends input and renders what it is told.
-   Signalling is done by copy-pasting one code each way, so the
-   game needs no backend of any kind.
+   NETWORK
+
+   Two ways in, both peer-to-peer once connected:
+
+   · JOIN CODE (the easy one) — the host is given a four-letter
+     code and a link. A public broker introduces the two
+     browsers to each other; after that the game data never
+     touches it.
+   · PASTE CODES (the fallback) — the two browsers introduce
+     themselves by copy-paste, needing no broker at all. Slower
+     to set up, but it works when the broker is blocked.
+
+   Either way the host owns the simulation and the guest sends
+   input and draws what it is told.
    ============================================================ */
 let netMode = "local";                 // "local" | "host" | "guest"
-let pc = null, ch = null, netNote = "";
-let localSeq  = { f:0, p:0, d:0, s:0, c:0 };   // guest: presses, as counters
-let remoteSeq = { f:0, p:0, d:0, s:0, c:0 };   // host: presses already applied
+let netNote = "";
+let pc = null, ch = null;              // paste-code path
+let peer = null, conn = null;          // join-code path
+let localSeq  = { f:0, p:0, d:0, s:0, c:0 };
+let remoteSeq = { f:0, p:0, d:0, s:0, c:0 };
 let remotePkt = { a:[0,0], f:0, p:0, d:0, s:0, c:0 };
 let lastUiKey = "";
 
-const enc = o => btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(o)))).replace(/=+$/,"");
-const dec = s => JSON.parse(new TextDecoder().decode(
-  Uint8Array.from(atob(s.trim().replace(/\s+/g,"")), c => c.charCodeAt(0))));
+/* Public STUN, plus a public TURN relay for the networks that refuse to
+   talk directly (strict company and mobile-carrier NATs). If the relay is
+   unreachable the connection simply falls back to a direct route. */
+const ICE = { iceServers:[
+  { urls:["stun:stun.l.google.com:19302","stun:global.stun.twilio.com:3478"] },
+  { urls:["turn:openrelay.metered.ca:80","turn:openrelay.metered.ca:443"],
+    username:"openrelayproject", credential:"openrelayproject" },
+]};
 
+/* A self-hosted PeerServer can be pointed at with ?broker=host:port */
+function brokerOptions(){
+  const q = new URLSearchParams(location.search).get("broker");
+  const base = { config:ICE, debug:0 };
+  if (!q) return base;
+  const [host, port] = q.split(":");
+  return Object.assign(base, { host, port: Number(port) || 9000, path:"/",
+                               secure: location.protocol === "https:" });
+}
+
+const PEERJS_SRCS = [
+  "https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js",
+  "https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.5/peerjs.min.js",
+];
+let peerLib = null;
+function loadPeerJS(){
+  if (window.Peer) return Promise.resolve(true);
+  if (peerLib) return peerLib;
+  peerLib = new Promise(resolve => {
+    let i = 0;
+    const attempt = () => {
+      if (window.Peer) return resolve(true);
+      if (i >= PEERJS_SRCS.length) return resolve(false);
+      const tag = document.createElement("script");
+      tag.src = PEERJS_SRCS[i++]; tag.async = true;
+      tag.onload  = () => resolve(!!window.Peer);
+      tag.onerror = attempt;
+      document.head.appendChild(tag);
+    };
+    attempt();
+    setTimeout(() => resolve(!!window.Peer), 9000);
+  });
+  return peerLib;
+}
+
+/* ---------- one transport interface, whichever path got us here ---------- */
+const LINK = { open:false, send(){}, close(){} };
+
+function linkUp(sendFn, closeFn){
+  LINK.open = true; LINK.send = sendFn; LINK.close = closeFn;
+  netNote = "";
+  if (netMode === "host") startSelect();
+  else show(`<div class="kicker">Connected</div><h2>Waiting for the host</h2>
+             <p>Choosing keepers begins in a moment.</p>`);
+}
+function linkData(msg){
+  if (!msg) return;
+  if (netMode === "host" && msg.i) remotePkt = msg.i;
+  else if (netMode === "guest" && msg.s) guestApply(msg.s, msg.u);
+}
+function linkDown(){
+  if (!LINK.open) return;
+  LINK.open = false;
+  netNote = "the other keeper disconnected";
+  toMenu();
+}
+function send(o){ if (LINK.open){ try { LINK.send(o); } catch {} } }
+
+/* ---------- join codes ---------- */
+const CODE_CHARS = "ACDEFGHJKMNPQRTUVWXY34679";   // no O/0, no I/1/L
+const PEER_PREFIX = "saltline-v1-";
+function makeCode(){
+  let out = "";
+  for (let i=0;i<4;i++) out += CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+  return out;
+}
+function shareLink(code){
+  if (location.protocol === "file:") return null;
+  return location.origin + location.pathname + "#" + code;
+}
+
+function wirePeerConn(c){
+  conn = c;
+  c.on("open",  () => linkUp(o => c.send(o), () => c.close()));
+  c.on("data",  msg => linkData(msg));
+  c.on("close", () => linkDown());
+  c.on("error", () => linkDown());
+}
+
+function hostOnline(attempt){
+  netMode = "host"; state = ST.NET;
+  netCardShell("Opening the tower", `<p>Reaching the meeting point…</p>`, "");
+  loadPeerJS().then(ok => {
+    if (netMode !== "host") return;
+    if (!ok) return brokerUnreachable("host");
+    const code = makeCode();
+    peer = new Peer(PEER_PREFIX + code, brokerOptions());
+    peer.on("open", () => { if (netMode === "host") hostCodeCard(code); });
+    peer.on("connection", c => { if (netMode === "host") wirePeerConn(c); });
+    peer.on("error", err => {
+      if (netMode !== "host") return;
+      if (err && err.type === "unavailable-id" && (attempt||0) < 5){
+        try { peer.destroy(); } catch {}
+        return hostOnline((attempt||0) + 1);       // that code was taken, take another
+      }
+      if (err && err.type === "peer-unavailable") return;
+      brokerUnreachable("host");
+    });
+  });
+}
+
+function joinOnline(code){
+  netMode = "guest"; state = ST.NET;
+  netCardShell("Joining", `<p>Looking for tower <b>${code}</b>…</p>`, "");
+  loadPeerJS().then(ok => {
+    if (netMode !== "guest") return;
+    if (!ok) return brokerUnreachable("guest");
+    peer = new Peer(undefined, brokerOptions());
+    peer.on("open", () => {
+      if (netMode !== "guest") return;
+      wirePeerConn(peer.connect(PEER_PREFIX + code, { reliable:false, serialization:"json" }));
+      setTimeout(() => {
+        if (netMode === "guest" && !LINK.open) joinCard(code, "no answer from " + code +
+          " — check the code, and that they still have the tower open");
+      }, 12000);
+    });
+    peer.on("error", err => {
+      if (netMode !== "guest") return;
+      if (err && err.type === "peer-unavailable")
+        joinCard(code, "nobody is holding the code " + code);
+      else brokerUnreachable("guest");
+    });
+  });
+}
+
+function brokerUnreachable(side){
+  show(`<div class="kicker">Online duel</div>
+    <h2>The meeting point is not answering</h2>
+    <p>Join codes need one small public service to introduce the two browsers.
+       It is either blocked on this network or temporarily down.</p>
+    <p>You can still play online without it — the two browsers can introduce
+       themselves by copy-paste instead. It takes one extra step each way.</p>
+    <button ${BTNS} id="manual">USE PASTE CODES</button>
+    <p class="hint">Press <kbd>Esc</kbd> to go back</p>`);
+  const b = document.getElementById("manual");
+  if (b) b.onclick = () => { netTeardown(); (side === "host" ? hostFlow : joinFlow)(); };
+}
+
+const CODE_BOX = `style="font:600 44px/1.1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  letter-spacing:.34em;color:#e8eef7;background:#0b131c;border:1px solid #24374b;border-radius:8px;
+  padding:18px 10px 18px 24px;text-align:center;margin:6px 0 4px"`;
+
+function hostCodeCard(code){
+  const link = shareLink(code);
+  show(`<div class="kicker">Online duel — you hold the left seat</div>
+    <h2>Your code</h2>
+    <div ${CODE_BOX}>${code}</div>
+    <p>Tell the other keeper to open the game, press <b>3</b>, and type it in.</p>
+    ${link ? `<p><b>Or send them this link</b> — it drops them straight in:</p>
+      <textarea ${TA} id="mine" readonly style="height:60px;width:100%;background:#0b131c;color:#cfe0f2;
+        border:1px solid #24374b;border-radius:6px;padding:10px;
+        font:500 12px/1.45 ui-monospace,monospace">${link}</textarea>
+      <button ${BTNS} id="copy">COPY LINK</button>` : ``}
+    <p class="hint blink" id="netstat">waiting for them to join…</p>
+    <p class="hint">Press <kbd>Esc</kbd> to go back &nbsp;·&nbsp;
+       <a href="#" id="manual" style="color:#8fb6d9">codes not working? paste instead</a></p>`);
+  const fb = document.getElementById("manual");
+  if (fb) fb.onclick = e => { e.preventDefault(); netTeardown(); hostFlow(); };
+  const b = document.getElementById("copy");
+  if (b) b.onclick = () => {
+    const t = document.getElementById("mine"); t.select();
+    navigator.clipboard?.writeText(t.value).then(()=>setStat("link copied"),
+                                                 ()=>setStat("select and copy manually"));
+  };
+}
+
+function joinCard(prefill, note){
+  netMode = "guest"; state = ST.NET;
+  show(`<div class="kicker">Online duel — you take the right seat</div>
+    <h2>Enter their code</h2>
+    <input id="code" maxlength="4" autocomplete="off" spellcheck="false"
+      value="${prefill||""}" placeholder="····" ${CODE_BOX} />
+    <button ${BTNS} id="go">JOIN</button>
+    <p class="hint" id="netstat">${note||"four letters, from whoever opened the tower"}</p>
+    <p class="hint">Press <kbd>Esc</kbd> to go back &nbsp;·&nbsp;
+       <a href="#" id="manual" style="color:#8fb6d9">codes not working? paste instead</a></p>`);
+  const fb = document.getElementById("manual");
+  if (fb) fb.onclick = e => { e.preventDefault(); netTeardown(); joinFlow(); };
+  const box = document.getElementById("code");
+  const go = () => {
+    const v = (box.value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,4);
+    if (v.length === 4) joinOnline(v); else setStat("that code is four characters long");
+  };
+  box.oninput = () => { box.value = box.value.toUpperCase().replace(/[^A-Za-z0-9]/g,""); };
+  box.onkeydown = e => { if (e.key === "Enter"){ e.preventDefault(); go(); } };
+  document.getElementById("go").onclick = go;
+  setTimeout(() => box.focus(), 30);
+}
+
+/* ---------- paste codes: no broker involved at all ---------- */
 function newPC(){
-  const p = new RTCPeerConnection({ iceServers:[
-    { urls:["stun:stun.l.google.com:19302","stun:global.stun.twilio.com:3478"] } ] });
+  const p = new RTCPeerConnection(ICE);
   p.onconnectionstatechange = () => {
     if (p.connectionState === "failed" || p.connectionState === "disconnected"){
       netNote = "connection lost";
@@ -1302,18 +1508,9 @@ function iceComplete(p){
 
 function wireChannel(){
   ch.binaryType = "arraybuffer";
-  ch.onopen = () => {
-    netNote = "";
-    if (netMode === "host") startSelect();
-    else show(`<div class="kicker">Connected</div><h2>Waiting for the host</h2>
-               <p>Choosing keepers begins in a moment.</p>`);
-  };
-  ch.onclose = () => { netNote = "the other keeper disconnected"; toMenu(); };
-  ch.onmessage = ev => {
-    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
-    if (netMode === "host" && msg.i){ remotePkt = msg.i; }
-    else if (netMode === "guest" && msg.s){ guestApply(msg.s, msg.u); }
-  };
+  ch.onopen = () => linkUp(o => ch.send(JSON.stringify(o)), () => ch.close());
+  ch.onclose = () => linkDown();
+  ch.onmessage = ev => { try { linkData(JSON.parse(ev.data)); } catch {} };
 }
 
 function netCardShell(title, body, status){
@@ -1330,7 +1527,7 @@ function setStat(t){ const el = document.getElementById("netstat"); if (el) el.t
 
 async function hostFlow(){
   netMode = "host"; state = ST.NET;
-  netCardShell("Hosting", `<p>Making your invitation code…</p>`, "gathering network routes");
+  netCardShell("Hosting by paste code", `<p>Making your invitation code…</p>`, "gathering network routes");
   pc = newPC();
   ch = pc.createDataChannel("duel", { ordered:false, maxRetransmits:0 });
   wireChannel();
@@ -1339,7 +1536,7 @@ async function hostFlow(){
   if (netMode !== "host") return;
   const code = enc({ t:pc.localDescription.type, s:pc.localDescription.sdp });
 
-  netCardShell("Hosting — you take the left seat", `
+  netCardShell("Hosting — you hold the left seat", `
     <p><b>1.</b> Send this invitation code to the other keeper:</p>
     <textarea ${TA} id="mine" readonly>${code}</textarea>
     <button ${BTNS} id="copy">COPY CODE</button>
@@ -1362,7 +1559,7 @@ async function hostFlow(){
 
 async function joinFlow(){
   netMode = "guest"; state = ST.NET;
-  netCardShell("Joining — you take the right seat", `
+  netCardShell("Joining by paste code", `
     <p><b>1.</b> Paste the host's invitation code:</p>
     <textarea ${TA} id="theirs" placeholder="their invitation code"></textarea>
     <button ${BTNS} id="go">GENERATE REPLY</button>`, "");
@@ -1391,15 +1588,21 @@ async function joinFlow(){
   };
 }
 
+const enc = o => btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(o)))).replace(/=+$/,"");
+const dec = s => JSON.parse(new TextDecoder().decode(
+  Uint8Array.from(atob(s.trim().replace(/\s+/g,"")), c => c.charCodeAt(0))));
+
 function netTeardown(){
+  LINK.open = false; LINK.send = () => {}; LINK.close = () => {};
+  try { conn && conn.close(); } catch {}
+  try { peer && peer.destroy(); } catch {}
   try { ch && ch.close(); } catch {}
   try { pc && pc.close(); } catch {}
-  ch = null; pc = null; netMode = "local";
+  conn = peer = ch = pc = null;
+  netMode = "local";
   localSeq = {f:0,p:0,d:0,s:0,c:0}; remoteSeq = {f:0,p:0,d:0,s:0,c:0};
   remotePkt = { a:[0,0], f:0, p:0, d:0, s:0, c:0 };
 }
-
-function send(o){ if (ch && ch.readyState === "open") { try { ch.send(JSON.stringify(o)); } catch {} } }
 
 /* host: turn the guest's packet into one frame of input.
    Presses arrive as counters, so a dropped packet never eats a shot. */
@@ -1905,8 +2108,8 @@ function tick(now){
   switch (state){
     case ST.MENU:
       if (edge.has("Digit1") || edge.has("Numpad1")){ netMode = "local"; CPU.seats = [false,false]; startSelect(); }
-      else if (edge.has("Digit2") || edge.has("Numpad2")) hostFlow();
-      else if (edge.has("Digit3") || edge.has("Numpad3")) joinFlow();
+      else if (edge.has("Digit2") || edge.has("Numpad2")) hostOnline(0);
+      else if (edge.has("Digit3") || edge.has("Numpad3")) joinCard("", "");
       else if (edge.has("Digit4") || edge.has("Numpad4")){ state = ST.DIFF; difficultyCard(); }
       break;
 
@@ -1964,6 +2167,8 @@ function tick(now){
 }
 
 menuCard();
+const linkCode = (location.hash || "").replace(/^#/,"").toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,4);
+if (linkCode.length === 4) joinOnline(linkCode);
 requestAnimationFrame(tick);
 </script>
 </body>
