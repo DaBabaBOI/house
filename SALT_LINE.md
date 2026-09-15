@@ -1,8 +1,10 @@
 # Salt Line
 
 A duel for two to six keepers, running entirely in one HTML file:
-`saltline.html`. No build step, no server, no dependencies. Open it, or host it
-anywhere static.
+`saltline.html`. No build step, no server, no dependencies, and **nothing
+fetched from the internet** — the networking library is bundled into the file
+itself, so it behaves the same opened straight from your Downloads folder as it
+does on a web host.
 
 ## The idea
 
@@ -18,6 +20,11 @@ it becomes a battle royale instead: last lamp burning, first to two rounds.
 The world is 1920 × 1200 — four times what fits on screen at once. The camera
 follows the living keepers and pulls back as they spread out, so a duel plays
 close and a six-way royale plays wide. Nobody is ever off-screen.
+
+It frames the keepers only, never the motes, and eases the zoom slowly with a
+deadzone so it settles instead of hunting; the view is snapped to whole pixels
+so nothing shimmers as it pans. Press **Z** during a round to stop it following
+altogether and hold the whole coast at once.
 
 ## Why it is skill, not luck
 
@@ -157,6 +164,10 @@ The host owns the simulation. The guest sends only its input — as counters
 rather than one-shot events, so a dropped packet never eats a shot or a special
 — and draws the state it is sent. Character select runs on the same channel, so
 both players see each other's cursor move before anything is locked in.
+
+If the code screen says the meeting point is not answering, the broker is
+blocked or down on that network — the card names the reason it gave. Paste codes
+still work there, because they put nothing in the middle.
 
 Connections go direct where the network allows it, and fall back to a public
 TURN relay for the strict company and mobile-carrier networks that refuse direct
