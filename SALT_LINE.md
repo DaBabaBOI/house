@@ -125,20 +125,31 @@ and whether it fires without a solution:
 
 | | Reaction | Banks | Guards | Hand |
 |---|---|---|---|---|
-| **Apprentice** | 0.38s | direct shots only | rarely | shaky (±20°) — fires blind, and hits itself doing it |
-| **Keeper** | 0.19s | one wall | about half | ±6° |
+| **Apprentice** | 0.38s | direct shots only | rarely | shaky (±22°) — fires blind, and hits itself doing it |
+| **Keeper** | 0.16s | one wall | about three in five | ±5° |
 | **Warden** | 0.09s | two walls | almost always | ±2° |
 | **Two Lights** | every frame | three walls | everything it can reach | **perfect — no error at all** |
 
-Everyone aims freely now, so the levels differ by reaction, steadiness of hand,
-how many walls they will bank a shot off, and how readily they guard.
+Everyone aims freely, so the levels differ by reaction, steadiness of hand, how
+many walls they will bank a shot off, and how readily they guard.
 
-Two Lights is not unbeatable, and it would be dishonest to claim otherwise.
-Measured with seat orders balanced: it takes 84% of decided rounds against
-Apprentice and 69% against Keeper, but only 45% against Warden — the top two
-are equals, because two keepers who both guard well mostly trade. Free aim also
-made every level deadlier, which narrowed the spread: Warden takes 87% against
-Apprentice and 70% against Keeper.
+**Two Lights** plays differently from the rest, not just better:
+
+- it picks its feet by simulation — every live mote is flown forward and each
+  of the eight directions (and the dash) is walked against them, taking
+  whichever survives longest. This only became worth having once aim stopped
+  being welded to movement, because it can now dodge with its feet while still
+  pointing wherever it likes;
+- it prefers shots that arrive **outside the arc your guard can reach**, since
+  a mote coming in from behind you cannot be parried at all — but only while
+  your guard is actually up; with it on cooldown it takes the fastest shot;
+- it fights at a distance, because every extra tenth of a second a mote spends
+  in the air favours whoever reads better, and it never misreads.
+
+Measured over 80 rounds a matchup with seat orders balanced, the ladder is
+monotonic: Keeper takes 68% of decided rounds against Apprentice, Warden 62%
+against Keeper, and Two Lights **76% against Warden** — 71% against Keeper and
+84% against Apprentice. It is still not unbeatable, and the card says so.
 
 Measured over 80 rounds per matchup with seat orders balanced; across 1,200
 mirror rounds from varied but symmetric starts, neither seat is favoured

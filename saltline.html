@@ -2273,17 +2273,19 @@ function guestApply(s, u){
        same way twice and can be learned instead of out-rolled.
    ============================================================ */
 const CPU_LEVELS = [
+  // A weak keeper should still shoot a lot: volume you can read and punish is
+  // beatable, where passivity just drags the round out to the dark.
   { id:"APPRENTICE", think:0.38, bounces:0, parryOdds:0.10, dashOdds:0.22,
-    specialOdds:0.30, lead:0.0,  hesitate:0.45, keepAt:290, blindFire:0.30, aimError:0.36 },
-  { id:"KEEPER",     think:0.19, bounces:1, parryOdds:0.50, dashOdds:0.68,
-    specialOdds:0.80, lead:0.5,  hesitate:0.20, keepAt:285, blindFire:0.06, aimError:0.11 },
+    specialOdds:0.30, lead:0.0,  hesitate:0.38, keepAt:285, blindFire:0.34, aimError:0.38 },
+  { id:"KEEPER",     think:0.16, bounces:1, parryOdds:0.62, dashOdds:0.70,
+    specialOdds:0.80, lead:0.6,  hesitate:0.16, keepAt:280, blindFire:0.05, aimError:0.08 },
   { id:"WARDEN",     think:0.09, bounces:2, parryOdds:0.90, dashOdds:0.95,
     specialOdds:1.00, lead:1.0,  hesitate:0.0,  keepAt:260, blindFire:0.0,  aimError:0.035 },
   // Reacts every frame, banks three walls, guards everything it can reach, and
   // will not stand anywhere a shot could already be on its way.
   { id:"TWO LIGHTS", think:1/60, bounces:3, parryOdds:1.00, dashOdds:1.00,
-    specialOdds:1.00, lead:1.0,  hesitate:0.0,  keepAt:210, blindFire:0.0, aimError:0,
-    sharpGuard:true, parryWindow:0.45 },
+    specialOdds:1.00, lead:1.0,  hesitate:0.0,  keepAt:430, blindFire:0.0, aimError:0,
+    sharpGuard:true, parryWindow:0.5, survival:true, unguardable:0.55 },
 ];
 
 const CPU = { seats:[false,false], level:1, mem:[null,null], selT:[] };
@@ -2388,7 +2390,7 @@ function cpuShotAlong(g, p, ang, foe, lvl){
     if (wall && ++bounces > lvl.bounces) return null;
     const lt = Math.min(t, 0.5) * lvl.lead;
     const fx = foe.x + foe.vx*lt, fy = foe.y + foe.vy*lt;
-    if (len(x-fx, y-fy) <= foe.st.radius + r + 2) return { t, bounces };
+    if (len(x-fx, y-fy) <= foe.st.radius + r + 2) return { t, bounces, vx, vy };
     if (bounces >= 1 && len(x-p.x, y-p.y) <= st.radius + r + 8) return null;   // it would come back for me
   }
   return null;
@@ -2401,17 +2403,37 @@ const DIRS_BANK = (() => {
   return out;
 })();
 
+/* A guard only catches what arrives inside the arc a keeper is facing. A mote
+   that comes in from behind them cannot be parried at all, so it is worth
+   waiting a little longer for. */
+function cpuGuardable(foe, vx, vy){
+  const from = Math.atan2(-vy, -vx);
+  const face = Math.atan2(foe.fy, foe.fx);
+  const off = Math.abs(Math.atan2(Math.sin(from-face), Math.cos(from-face)));
+  return off <= foe.st.parryArc/2;
+}
+
 function cpuFindShot(g, p, foe, lvl){
   const lead = 0.5 * lvl.lead;
   const direct = Math.atan2(foe.y + foe.vy*lead - p.y, foe.x + foe.vx*lead - p.x);
   const straight = cpuShotAlong(g, p, direct, foe, lvl);
-  if (straight) return { angle:direct, score:straight.t };
+
+  // Hunting for an angle their guard cannot reach is only worth the wait while
+  // their guard is actually up. With it on cooldown, the fastest shot wins.
+  const guardUp = foe.parryCd <= 0.12;
+  const bonus = (guardUp && lvl.unguardable) ? lvl.unguardable : 0;
 
   let best = null;
+  if (straight){
+    const open = !cpuGuardable(foe, straight.vx, straight.vy);
+    best = { angle:direct, score:straight.t - (open ? bonus : 0) };
+    if (!bonus) return best;                    // nothing to shop around for
+  }
   for (const ang of DIRS_BANK){
     const hit = cpuShotAlong(g, p, ang, foe, lvl);
     if (!hit) continue;
-    const score = hit.t + hit.bounces*0.3;
+    const open = !cpuGuardable(foe, hit.vx, hit.vy);
+    const score = hit.t + hit.bounces*0.3 - (open ? bonus : 0);
     if (!best || score < best.score) best = { angle:ang, score };
   }
   return best;
@@ -2452,6 +2474,73 @@ function cpuEscape(g, p, threats){
     if (!best || score > best.score) best = { dir:[dx,dy], score };
   }
   return best ? best.dir : [0,0];
+}
+
+/* Now that aim is free of movement, a keeper can dodge with its feet while
+   still pointing wherever it likes — so the top level picks its feet by
+   simulation: fly every live mote forward, walk each of the eight directions
+   (and the dash) against them, and take whichever survives longest. This was
+   not worth having while aiming and moving were the same act. */
+const SURV_STEP = 1/30, SURV_HORIZON = 0.85;
+
+function cpuMotePaths(g, p){
+  const out = [];
+  for (const mo of g.motes){
+    if (!mo.armed && mo.owner === p.idx) continue;
+    let x = mo.x, y = mo.y, vx = mo.vx, vy = mo.vy;
+    const r = mo.radius, pts = [];
+    for (let t = SURV_STEP; t <= SURV_HORIZON; t += SURV_STEP){
+      for (let k=0;k<3;k++){
+        const h = SURV_STEP/3;
+        x += vx*h; y += vy*h;
+        const b = g.bounds();
+        if (x < b.x+r){ x=b.x+r; vx=-vx; } else if (x > b.x+b.w-r){ x=b.x+b.w-r; vx=-vx; }
+        if (y < b.y+r){ y=b.y+r; vy=-vy; } else if (y > b.y+b.h-r){ y=b.y+b.h-r; vy=-vy; }
+        for (const w of g.obstacles){
+          const probe = {x,y}, axis = resolveCircleRect(probe, w, r);
+          if (!axis) continue;
+          x = probe.x; y = probe.y;
+          if (w.void){ vx = vy = 0; break; }
+          if (axis === "x") vx = -vx; else vy = -vy;
+        }
+      }
+      pts.push(x, y);
+    }
+    out.push({ r, pts });
+  }
+  return out;
+}
+
+function cpuSafestMove(g, p, foe, lvl){
+  const paths = cpuMotePaths(g, p);
+  const b = g.bounds();
+  let best = null;
+  for (const [dx,dy] of DIRS8){
+    for (const dash of [false, true]){
+      if (dash && p.dashCd > 0) continue;
+      let px = p.x, py = p.y, survived = SURV_HORIZON, k = 0;
+      for (let t = SURV_STEP; t <= SURV_HORIZON; t += SURV_STEP, k++){
+        const v = dash && t <= p.st.dashTime ? p.st.dashSpeed : p.st.maxSpeed;
+        const nx = px + dx*v*SURV_STEP, ny = py + dy*v*SURV_STEP;
+        if (!cpuBlocked(g, nx, ny, p.st.radius)){ px = nx; py = ny; }
+        let hit = false;
+        for (const path of paths){
+          const ix = path.pts[k*2], iy = path.pts[k*2+1];
+          if (ix === undefined) continue;
+          if (len(px-ix, py-iy) <= p.st.radius + path.r + 4){ hit = true; break; }
+        }
+        if (hit){ survived = t; break; }
+      }
+      let score = survived * 100;
+      score -= Math.abs(len(foe.x-px, foe.y-py) - lvl.keepAt) * 0.03;
+      score += Math.min(px-b.x, b.x+b.w-px, py-b.y, b.y+b.h-py) * 0.05;
+      score += (dx*p.fx + dy*p.fy) * 0.2;
+      if (survived >= SURV_HORIZON && cpuClearLine(g, {x:px, y:py}, foe)) score += 16;
+      if (dash) score -= 5;                       // the dash is worth keeping
+      if (!best || score > best.score) best = { dir:[dx,dy], dash, score };
+    }
+  }
+  return best || { dir:[0,0], dash:false };
 }
 
 function cpuRoam(g, p, foe, threats, lvl){
@@ -2527,7 +2616,11 @@ function cpuPlan(g, seat, lvl, m){
 
   // Where to stand. Aiming no longer competes with this, so a keeper can back
   // away from one mote while shooting at the keeper who sent it.
-  if (worst && worst.t < 0.42){
+  if (lvl.survival){
+    const mv = cpuSafestMove(g, p, foe, lvl);
+    m.dir = mv.dir;
+    if (mv.dash) m.dash = true;
+  } else if (worst && worst.t < 0.42){
     m.dir = cpuEscape(g, p, threats);
     if (p.dashCd <= 0 && worst.t < 0.26 && cpuDraw(p, worst.id*29, 23) < lvl.dashOdds) m.dash = true;
   } else {
@@ -2542,6 +2635,12 @@ function cpuPlan(g, seat, lvl, m){
     if (p.char.id === "meran"){ if (shot) m.aim = cpuAimAt(p, lvl, shot.angle, 5); }
     else if (p.char.id === "ines" && shot){ m.aim = cpuAimAt(p, lvl, shot.angle, 7); return; }
     else return;
+  }
+
+  // Their guard has a cooldown. If it is down and a shot is there, take it —
+  // baiting one parry and firing into the gap beats trading guards.
+  if (lvl.survival && shot && foe.parryCd > 0.12 && (!worst || worst.t > 0.28)){
+    m.aim = shot.angle; m.fire = true; return;
   }
 
   if (worst && worst.t < (lvl.parryWindow || 0.55) && p.parryCd <= 0 && p.ghost <= 0 &&
