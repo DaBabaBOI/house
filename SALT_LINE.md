@@ -123,9 +123,10 @@ difficulty card says so: it aims in any direction rather than the eight a
 keyboard makes, reacts every frame, and does not mistime a guard. It is not
 built to be fair.
 
-It is also not unbeatable, and it would be dishonest to claim otherwise — it
-takes only about 59% of decided rounds against Warden, because two keepers who
-both guard well mostly trade. Against anything human-paced it is another story.
+It is also not unbeatable, and it would be dishonest to claim otherwise. It
+takes 59% of decided rounds against Warden, because two keepers who both guard
+well mostly trade. Against human-paced play it is another matter: 86% against
+Keeper and 96% against Apprentice.
 
 Measured over 80 rounds per matchup with seat orders balanced; across 1,200
 mirror rounds from varied but symmetric starts, neither seat is favoured
