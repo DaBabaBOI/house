@@ -32,8 +32,10 @@ Nothing in the simulation is random. There are no crits, no spread, no spawns yo
 cannot predict — `Math.random` is called only for spark particles, which touch
 nothing that decides a round. Everything below is a decision:
 
-- **Aim is welded to movement.** You fire wherever you are moving. Repositioning
-  and aiming are the same act, so you cannot line up a shot for free.
+- **Aim is its own axis.** Point the mirror anywhere with the mouse, or turn it
+  with two keys. Aim and movement are separate, so you can back away from one
+  mote while answering the keeper who sent it. Point nothing and you simply face
+  the way you run.
 - **Motes arm after their first wall.** Your own shot is inert while it is leaving
   you and lethal to *everyone* after one bounce. Fire into a corridor and you have
   to remember where it went.
@@ -83,11 +85,14 @@ earns exactly nothing, and so does running and dashing. It fills only from:
 
 | | Player one | Player two |
 |---|---|---|
-| Move & aim | `W A S D` | arrow keys |
-| Fire | `Space` | `.` |
-| Guard / parry | `Q` | `,` |
+| Move | `W A S D` | arrow keys |
+| Aim | the mouse, or `Z` / `X` to turn | `L` / `'` to turn |
+| Fire | left-click or `Space` | `.` |
+| Guard / parry | right-click or `Q` | `,` |
 | Dash | `E` | `/` |
 | Special | `F` | `;` |
+
+`V` locks the camera to the whole coast.
 
 `Esc` returns to the menu. Online, both players use the left-hand set.
 
@@ -118,22 +123,22 @@ Difficulty is a capability, not a handicap dial. Each level differs in reaction
 time, how many walls it will bank a shot off, how often it commits to a guard,
 and whether it fires without a solution:
 
-| | Reaction | Banks | Guards | Aim |
+| | Reaction | Banks | Guards | Hand |
 |---|---|---|---|---|
-| **Apprentice** | 0.30s | direct shots only | rarely | eight directions — fires blind, and hits itself doing it |
-| **Keeper** | 0.17s | one wall | about half | eight directions |
-| **Warden** | 0.085s | two walls | almost always | eight directions |
-| **Two Lights** | every frame | three walls | everything it can reach | **continuous — no keyboard can do this** |
+| **Apprentice** | 0.38s | direct shots only | rarely | shaky (±20°) — fires blind, and hits itself doing it |
+| **Keeper** | 0.19s | one wall | about half | ±6° |
+| **Warden** | 0.09s | two walls | almost always | ±2° |
+| **Two Lights** | every frame | three walls | everything it can reach | **perfect — no error at all** |
 
-The first three are held to what a player gets. **Two Lights is not**, and the
-difficulty card says so: it aims in any direction rather than the eight a
-keyboard makes, reacts every frame, and does not mistime a guard. It is not
-built to be fair.
+Everyone aims freely now, so the levels differ by reaction, steadiness of hand,
+how many walls they will bank a shot off, and how readily they guard.
 
-It is also not unbeatable, and it would be dishonest to claim otherwise. It
-takes 59% of decided rounds against Warden, because two keepers who both guard
-well mostly trade. Against human-paced play it is another matter: 86% against
-Keeper and 96% against Apprentice.
+Two Lights is not unbeatable, and it would be dishonest to claim otherwise.
+Measured with seat orders balanced: it takes 84% of decided rounds against
+Apprentice and 69% against Keeper, but only 45% against Warden — the top two
+are equals, because two keepers who both guard well mostly trade. Free aim also
+made every level deadlier, which narrowed the spread: Warden takes 87% against
+Apprentice and 70% against Keeper.
 
 Measured over 80 rounds per matchup with seat orders balanced; across 1,200
 mirror rounds from varied but symmetric starts, neither seat is favoured
@@ -160,10 +165,22 @@ blocked on your network, the game says so and offers the old **paste-code**
 route, which needs no broker at all: the host sends one code, the guest sends
 one back, and you are connected.
 
-The host owns the simulation. The guest sends only its input — as counters
-rather than one-shot events, so a dropped packet never eats a shot or a special
-— and draws the state it is sent. Character select runs on the same channel, so
-both players see each other's cursor move before anything is locked in.
+The host owns the simulation, so the two screens can never disagree about who
+died. The guest sends only its input, as counters rather than one-shot events,
+so a dropped packet cannot eat a shot or a special.
+
+Because the channel is deliberately unreliable — a lost packet is skipped rather
+than holding everything up behind it — **nothing is ever said only once**. Every
+packet carries the receiving seat's number, so a guest that misses the opening
+handshake simply learns its seat from the next packet instead of driving the
+wrong keeper.
+
+A guest also runs the movement maths on its own keeper immediately rather than
+waiting for the round trip, and eases that prediction back toward the host's
+version as packets arrive; shots and guards stay with the host. Other keepers
+are eased between packets and motes carry on along their last known velocity, so
+a lost packet costs a little smoothness rather than a freeze. If the host goes
+quiet the guest says so, and recovers by itself when packets resume.
 
 If the code screen says the meeting point is not answering, the broker is
 blocked or down on that network — the card names the reason it gave. Paste codes
