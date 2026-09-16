@@ -32,10 +32,10 @@ Nothing in the simulation is random. There are no crits, no spread, no spawns yo
 cannot predict — `Math.random` is called only for spark particles, which touch
 nothing that decides a round. Everything below is a decision:
 
-- **Aim is its own axis.** Point the mirror anywhere with the mouse, or turn it
-  with two keys. Aim and movement are separate, so you can back away from one
-  mote while answering the keeper who sent it. Point nothing and you simply face
-  the way you run.
+- **Aim is welded to movement.** You fire wherever you are running, in the eight
+  directions a keyboard makes. Repositioning and aiming are the same act, so no
+  shot comes for free — half the skill is walking onto the line before you take
+  it.
 - **Motes arm after their first wall.** Your own shot is inert while it is leaving
   you and lethal to *everyone* after one bounce. Fire into a corridor and you have
   to remember where it went.
@@ -87,10 +87,9 @@ Defaults:
 
 | | Player one | Player two |
 |---|---|---|
-| Move | `W A S D` | arrow keys |
-| Aim | the mouse, or `Z` / `X` to turn | `L` / `'` to turn |
-| Fire | left-click or `Space` | `.` |
-| Guard / parry | right-click or `Q` | `,` |
+| Move & aim | `W A S D` | arrow keys |
+| Fire | `Space` | `.` |
+| Guard / parry | `Q` | `,` |
 | Dash | `E` | `/` |
 | Special | `F` | `;` |
 
@@ -105,8 +104,8 @@ storage the screen says so and they last for the session. There is a reset to
 defaults. Whatever a player binds to fire also works to advance the story cards
 and lock in a keeper.
 
-`V` locks the camera to the whole coast. Mouse aiming is player one's and is not
-rebindable.
+`V` locks the camera to the whole coast. The mouse drives the menus and the
+keeper select; aiming is the keyboard's.
 
 `Esc` returns to the menu. Online, both players use the left-hand set.
 
@@ -137,33 +136,31 @@ Difficulty is a capability, not a handicap dial. Each level differs in reaction
 time, how many walls it will bank a shot off, how often it commits to a guard,
 and whether it fires without a solution:
 
-| | Reaction | Banks | Guards | Hand |
+| | Reaction | Banks | Guards | Lines up |
 |---|---|---|---|---|
-| **Apprentice** | 0.38s | direct shots only | rarely | shaky (±22°) — fires blind, and hits itself doing it |
-| **Keeper** | 0.16s | one wall | about three in five | ±5° |
-| **Warden** | 0.09s | two walls | almost always | ±2° |
-| **Two Lights** | every frame | three walls | everything it can reach | **perfect — no error at all** |
+| **Apprentice** | 0.38s | direct shots only | rarely | barely — fires blind, and hits itself doing it |
+| **Keeper** | 0.17s | one wall | about three in five | some |
+| **Warden** | 0.09s | two walls | almost always | well |
+| **Two Lights** | every frame | three walls | everything it can reach | relentlessly |
 
-Everyone aims freely, so the levels differ by reaction, steadiness of hand, how
-many walls they will bank a shot off, and how readily they guard.
+The levels are held to the same eight directions you are. They differ by how
+fast they react, how many walls they will bank a shot off, how readily they
+guard, and — the one that turned out to matter most — how hard they work to walk
+onto a line that actually puts a mote into you.
 
-**Two Lights** plays differently from the rest, not just better:
-
-- it picks its feet by simulation — every live mote is flown forward and each
-  of the eight directions (and the dash) is walked against them, taking
-  whichever survives longest. This only became worth having once aim stopped
-  being welded to movement, because it can now dodge with its feet while still
-  pointing wherever it likes;
-- it prefers shots that arrive **outside the arc your guard can reach**, since
-  a mote coming in from behind you cannot be parried at all — but only while
-  your guard is actually up; with it on cooldown it takes the fastest shot;
-- it fights at a distance, because every extra tenth of a second a mote spends
-  in the air favours whoever reads better, and it never misreads.
+**Two Lights** reacts every frame, banks three walls, guards everything it can
+reach, and works hardest of all at lining its shots up. It also prefers shots
+that arrive **outside the arc your guard can reach** — a mote coming in from
+behind you cannot be parried at all — but only while your guard is up; with it
+on cooldown it simply takes the fastest shot.
 
 Measured over 80 rounds a matchup with seat orders balanced, the ladder is
-monotonic: Keeper takes 68% of decided rounds against Apprentice, Warden 62%
-against Keeper, and Two Lights **76% against Warden** — 71% against Keeper and
-84% against Apprentice. It is still not unbeatable, and the card says so.
+monotonic: Keeper takes 76% of decided rounds against Apprentice, Warden 79%
+against Keeper, and Two Lights **73% against Warden** — 93% against Keeper and
+90% against Apprentice. Mutual kills are common at the top (about half the
+rounds against Warden end with both lamps out, and are replayed), which is what
+aggression costs in a game where one hit ends a round. It is still not
+unbeatable, and the card says so.
 
 Measured over 80 rounds per matchup with seat orders balanced; across 1,200
 mirror rounds from varied but symmetric starts, neither seat is favoured
